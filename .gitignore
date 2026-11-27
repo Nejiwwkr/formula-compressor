@@ -1,0 +1,25 @@
+# Build
+Build/
+build/
+out/
+.vs/
+CMakeFiles/
+CMakeCache.txt
+*.vcxproj*
+*.sln
+*.user
+
+.idea/
+
+# Vendored dependency and release archive
+ThirdParty/
+juce-*.zip
+
+# Release output and local validation tools
+dist/
+Tools/pluginval/
+Tools/pluginval.exe
+
+# OS
+Thumbs.db
+.DS_Store
