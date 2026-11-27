@@ -11,8 +11,7 @@
 #include <memory>
 #include <vector>
 
-class FormulaCompressorAudioProcessor final : public juce::AudioProcessor,
-                                              private juce::Timer
+class FormulaCompressorAudioProcessor final : public juce::AudioProcessor
 {
 public:
     FormulaCompressorAudioProcessor();
@@ -150,9 +149,7 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    void timerCallback() override;
     void publishProgramLocked (const formula::Program& program);
-    void retireOldProgramsLocked();
     void loadEngineParameters (formula::EngineParameters&) const;
     void applyFormulaFromState();
 
@@ -184,19 +181,16 @@ private:
     std::shared_ptr<const formula::Program> liveProgram;
     std::atomic<const formula::Program*> publishedProgram { nullptr };
 
-    struct RetiredProgram
-    {
-        std::shared_ptr<const formula::Program> program;
-        std::uint32_t stampMs = 0;
-    };
-
-    std::vector<RetiredProgram> retiredPrograms;
+    // Programs are retained for the processor's lifetime so the raw pointer
+    // read by the audio thread can never dangle inside a process() call.
+    std::vector<std::shared_ptr<const formula::Program>> programHistory;
 
     formula::CompileResult lastCompile;
     juce::ChangeBroadcaster formulaBroadcaster;
 
     std::atomic<int> editorRefCount { 0 };
     std::atomic<bool> uiFrozen { false };
+    std::atomic<bool> engineResetRequested { false };
 
     std::atomic<int> formulaDomain { 0 };
 

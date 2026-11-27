@@ -1,5 +1,8 @@
 # Formula Compressor
 
+[![Build](https://github.com/Nejiwwkr/formula-compressor/actions/workflows/build.yml/badge.svg)](https://github.com/Nejiwwkr/formula-compressor/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/Nejiwwkr/formula-compressor)](https://github.com/Nejiwwkr/formula-compressor/releases/latest)
+
 **Write the compression curve.**
 
 A normal compressor is a fixed transfer curve, usually `f(x) = min(x, ax + b)`.
@@ -9,6 +12,14 @@ timing. The result is a usable dynamics processor and a small playground for
 custom compression shapes.
 
 ![Formula Compressor interface](Docs/ui-level.png)
+
+## Download
+
+Windows x64 builds are published on the
+[Releases](https://github.com/Nejiwwkr/formula-compressor/releases/latest) page
+as a zip with the VST3, the standalone application, install notes, and a
+SHA-256 checksum. The binaries are not code-signed, so Windows SmartScreen may
+warn about an unknown publisher.
 
 ## How it works
 
@@ -87,12 +98,12 @@ together; click again to resume.
   reduction shading, dashed inversion and a live operating point.
 - **Time scope** with input/output levels and the gain curve on one dBFS axis.
 - **Attack, Release, Hold** on the detector envelope.
-- **Peak / RMS detection** (RMS window: 10 ms).
+- **Peak / RMS detection** (RMS uses a 10 ms one-pole time constant).
 - **Input gain, Mix and Makeup** for drive, parallel compression and output trim.
 - **Twelve built-in formulas** (linear and dB) plus user presets stored as XML.
 - **Input, output and gain-reduction meters.**
 - **0 latency**, mono or stereo, 44.1–192 kHz.
-- Every knob and switch is a real VST3 parameter that can be automated and undone.
+- Every knob and switch is a real VST3 parameter that can be automated.
 
 ## Formula language
 
@@ -155,7 +166,7 @@ the error.
 | Mix | 0–100% | 100% | dry / wet |
 | Input Gain | -24..+24 dB | 0 dB | trim before the detector |
 | Makeup | -12..+24 dB | 0 dB | output gain |
-| Detector | Peak / RMS | Peak | RMS uses a 10 ms window |
+| Detector | Peak / RMS | Peak | RMS uses a 10 ms one-pole time constant |
 | P1–P4 | -1..+1 | 0.25, 0.25, 0, 0 | formula variables |
 | Bypass | on / off | off | host-visible bypass parameter |
 
@@ -180,14 +191,14 @@ state under a name.
 
 ## Build (Windows)
 
-Requirements: Visual Studio 2022 with the Desktop C++ workload, CMake 3.22+.
+Requirements: Visual Studio 2022 with the Desktop C++ workload, CMake 3.24+.
 
-JUCE 8.0.15 is vendored under `ThirdParty/` (git-ignored). Extract the release
-archive once if the folder is missing:
+JUCE 8.0.15 is fetched automatically by CMake from a pinned release tarball.
+To build offline, point `FORMULA_JUCE_PATH` at a local JUCE checkout, or keep
+the optional `ThirdParty/JUCE-8.0.15` directory in place:
 
 ```powershell
-New-Item -ItemType Directory -Force -Path ThirdParty/JUCE-8.0.15 | Out-Null
-Expand-Archive -Path juce-8.0.15-windows.zip -DestinationPath ThirdParty/JUCE-8.0.15
+cmake -S . -B Build -G "Visual Studio 17 2022" -A x64 -DFORMULA_JUCE_PATH=C:\path\to\JUCE
 ```
 
 Configure and build:
@@ -238,6 +249,15 @@ powershell -ExecutionPolicy Bypass -File Tools\install_vst3.ps1
 
 Installs to `%APPDATA%\VST3`; add `-System` for
 `C:\Program Files\Common Files\VST3`. Rescan plug-ins in your DAW afterwards.
+
+## License
+
+Formula Compressor is licensed under the GNU Affero General Public License v3.0
+(AGPL-3.0). This is required because the project uses JUCE 8 under its AGPLv3
+option; no commercial JUCE license is included. The corresponding source for
+each release is this repository at the matching tag. See
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for JUCE and bundled dependency
+notices, and [LICENSE](LICENSE) for the full license text.
 
 ## Limitations
 

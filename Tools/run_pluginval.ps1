@@ -79,7 +79,7 @@ if (-not $exe) {
 
 $outputDirectory = Join-Path $root 'Build\pluginval'
 New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
-$junit = Join-Path $outputDirectory 'pluginval.xml'
+$log = Join-Path $outputDirectory 'pluginval.log'
 
 $arguments = @(
     'validate',
@@ -90,7 +90,7 @@ $arguments = @(
     '--repeat', "$Repeat",
     '--verbose',
     '--output-dir', "`"$outputDirectory`"",
-    '--junit-xml', "`"$junit`""
+    '--output-filename', 'pluginval.log'
 )
 
 if ($SkipGuiTests) {
@@ -104,10 +104,10 @@ Write-Host "Running: $exe $($arguments -join ' ')"
 $exitCode = $LASTEXITCODE
 
 if ($exitCode -eq 0) {
-    Write-Host "pluginval PASSED (strictness $Strictness). JUnit: $junit"
+    Write-Host "pluginval PASSED (strictness $Strictness). Log: $log"
 }
 else {
-    Write-Host "pluginval FAILED with exit code $exitCode. See $junit"
+    Write-Host "pluginval FAILED with exit code $exitCode. See $log"
 }
 
 exit $exitCode

@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.2.1 — 2026-11-27
+
+- Relicensed to AGPL-3.0 to match the JUCE 8 AGPLv3 distribution option.
+  Release zips now include `LICENSE` and `THIRD-PARTY-NOTICES.md`, and the
+  release workflow publishes a SHA-256 checksum.
+- CI is repaired for the current runner images: the Windows job uses
+  `windows-2022` with VS 2022, and JUCE is fetched by CMake from a pinned
+  8.0.15 tarball (with a local `FORMULA_JUCE_PATH` escape hatch). Fresh clones
+  no longer need a manually extracted `ThirdParty/` directory.
+- Release automation now builds on a read-only token and publishes from a
+  separate tag-only job with `contents: write`; tag/version consistency and the
+  zip checksum are verified before upload. pluginval's unsupported
+  `--junit-xml` argument was removed in favour of a log file.
+- Fixed a message-thread / audio-thread race: state restores now request
+  `engine.reset()` through an atomic consumed at the start of `processBlock()`
+  instead of resetting the engine directly from `setStateInformation()`.
+- Program versions are retained for the processor's lifetime, so the audio
+  thread's raw program pointer cannot dangle inside a process call.
+- The GR meter now reports the largest reduction in the block (minimum gain)
+  instead of only the last sample, so short transients are no longer missed.
+- NaN/Inf input is sanitised, detector input is clamped to prevent square
+  overflow, output samples have a final finite guard, and the engine has its
+  own denormal guard.
+- State loading now reads `stateVersion` and explicitly treats pre-1.2 states
+  without `xDomain` as AMP; unknown future versions load best-effort.
+- Documentation: RMS is described as a 10 ms one-pole mean-square time constant
+  rather than a 10 ms window; the automation claim no longer implies plug-in
+  level undo. Tests cover block-peak GR, NaN/Inf/extreme input, RMS time
+  constant, state migration, mono processing and sample-rate changes.
+- No state-format change: `stateVersion` remains 3.
+
 ## 1.2.0
 
 - New `x:` AMP / dBFS switch. In dBFS mode both `x` and `f(x)` are in dBFS and

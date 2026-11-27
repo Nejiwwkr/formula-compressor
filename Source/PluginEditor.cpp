@@ -178,7 +178,7 @@ FormulaCompressorAudioProcessorEditor::FormulaCompressorAudioProcessorEditor (
     setupSegmentedButton (detectorPeakButton, 0x44455431,
                           "Peak detection follows transients.");
     setupSegmentedButton (detectorRmsButton, 0x44455431,
-                          "RMS detection follows average energy (10 ms window).");
+                          "RMS detection follows average energy (10 ms time constant).");
 
     detectorPeakButton.onClick = [this]
     {

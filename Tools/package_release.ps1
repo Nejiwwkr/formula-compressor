@@ -32,9 +32,12 @@ $standalone = Join-Path $artefacts "Standalone\$pluginName.exe"
 $readme = Join-Path $root 'README.md'
 $readmeZh = Join-Path $root 'README.zh-CN.md'
 $changelog = Join-Path $root 'CHANGELOG.md'
+$license = Join-Path $root 'LICENSE'
+$notices = Join-Path $root 'THIRD-PARTY-NOTICES.md'
 $installer = Join-Path $PSScriptRoot 'install_vst3.ps1'
 
-foreach ($required in @($vst3, $standalone, $readme, $changelog, $installer)) {
+foreach ($required in @($vst3, $standalone, $readme, $readmeZh, $changelog,
+                       $license, $notices, $installer)) {
     if (-not (Test-Path -LiteralPath $required)) {
         throw "Missing required file: $required"
     }
@@ -66,6 +69,8 @@ Copy-Item -LiteralPath $standalone -Destination (Join-Path $stage "Standalone\$p
 Copy-Item -LiteralPath $readme -Destination $stage -Force
 Copy-Item -LiteralPath $readmeZh -Destination $stage -Force
 Copy-Item -LiteralPath $changelog -Destination $stage -Force
+Copy-Item -LiteralPath $license -Destination $stage -Force
+Copy-Item -LiteralPath $notices -Destination $stage -Force
 Copy-Item -LiteralPath $installer -Destination $stage -Force
 
 Write-Host "Staged: $stage"
@@ -76,7 +81,11 @@ if (Test-Path -LiteralPath $zip) {
 
 Compress-Archive -Path $stage -DestinationPath $zip -Force
 $hash = Get-FileHash -LiteralPath $zip -Algorithm SHA256
+$checksums = Join-Path $distRoot 'SHA256SUMS.txt'
+$hashLine = "$($hash.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($zip))"
+[System.IO.File]::WriteAllText($checksums, $hashLine + "`n")
 
-Write-Host "Zip:    $zip"
-Write-Host "Size:   $([math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 2)) MB"
-Write-Host "SHA256: $($hash.Hash)"
+Write-Host "Zip:       $zip"
+Write-Host "Size:      $([math]::Round((Get-Item -LiteralPath $zip).Length / 1MB, 2)) MB"
+Write-Host "SHA256:    $($hash.Hash)"
+Write-Host "Checksums: $checksums"

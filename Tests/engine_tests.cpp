@@ -4,6 +4,7 @@
 #include "dsp/ExpressionParser.h"
 
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace
@@ -219,6 +220,80 @@ void tests::testEngine()
 
         CHECK_CLOSE (processStereo (0), 0.488, 0.03);
         CHECK_CLOSE (processStereo (1), 0.35355, 0.02);
+    }
+
+    // RMS uses a 10 ms one-pole time constant: after one time constant the
+    // mean square has reached 1 - e^-1 of a DC step.
+    {
+        Rig rig ("x");
+        rig.parameters.detectorMode = 1;
+        rig.parameters.attackMs = 0.1f;
+
+        rig.run (0.5f, samplesForMs (10.0));
+        CHECK_CLOSE (rig.engine.getEnvelopeLevel(),
+                     0.5 * std::sqrt (1.0 - std::exp (-1.0)),
+                     0.012);
+    }
+
+    // The GR meter reports the strongest reduction in the block, not the
+    // last sample (which may already have recovered).
+    {
+        Rig rig ("min(x, 0.25)");
+        rig.parameters.attackMs = 0.1f;
+        rig.parameters.releaseMs = 5.0f;
+
+        constexpr int count = 512;
+        std::vector<float> left (count, 0.05f);
+        std::vector<float> right (count, 0.05f);
+
+        for (int i = 0; i < 64; ++i)
+            left[static_cast<std::size_t> (i)]
+                = right[static_cast<std::size_t> (i)] = 0.8f;
+
+        float* pointers[2] = { left.data(), right.data() };
+        rig.engine.process (pointers, 2, count, rig.parameters);
+
+        const float* capture = rig.engine.getLastGainCapture();
+        CHECK (capture != nullptr);
+        CHECK (rig.engine.getGainCaptureSize() >= count);
+
+        float minDb = std::numeric_limits<float>::infinity();
+
+        for (int i = 0; i < count; ++i)
+            minDb = std::min (minDb, 20.0f * std::log10 (
+                std::max (1.0e-9f, std::abs (capture[i]))));
+
+        CHECK (minDb < -6.0f);
+        CHECK_CLOSE (rig.engine.getGainReductionDb(), minDb, 0.01);
+    }
+
+    // Non-finite and extreme finite input must not propagate NaN/Inf.
+    {
+        Rig rig ("x");
+        rig.parameters.attackMs = 0.5f;
+
+        constexpr int count = 512;
+        std::vector<float> left (count, 0.25f);
+        std::vector<float> right (count, 0.25f);
+
+        left[0] = std::numeric_limits<float>::quiet_NaN();
+        left[1] = std::numeric_limits<float>::infinity();
+        left[2] = -std::numeric_limits<float>::infinity();
+        left[3] = 1.0e30f;
+        right[0] = 1.0e30f;
+        right[1] = std::numeric_limits<float>::quiet_NaN();
+        right[2] = std::numeric_limits<float>::infinity();
+        right[3] = -std::numeric_limits<float>::infinity();
+
+        float* pointers[2] = { left.data(), right.data() };
+        rig.engine.process (pointers, 2, count, rig.parameters);
+
+        CHECK (allFinite (left));
+        CHECK (allFinite (right));
+        CHECK (std::isfinite (rig.engine.getEnvelopeLevel()));
+        CHECK (std::isfinite (rig.engine.getGainReductionDb()));
+        CHECK (std::isfinite (rig.engine.getInputLevelDb()));
+        CHECK (std::isfinite (rig.engine.getOutputLevelDb()));
     }
 
     // Negative gain is polarity inversion, not silence.

@@ -1,13 +1,33 @@
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.24)
 
-project(FormulaCompressor VERSION 1.2.0 LANGUAGES C CXX)
+project(FormulaCompressor VERSION 1.2.1 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# JUCE 8.0.15, vendored locally in ThirdParty/ (extracted from the release zip).
-add_subdirectory(ThirdParty/JUCE-8.0.15/JUCE EXCLUDE_FROM_ALL)
+set(JUCE_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(JUCE_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
+
+# JUCE 8.0.15 is pinned to a release tarball so a fresh clone can configure
+# without a manual download. A local checkout can be supplied with
+# -DFORMULA_JUCE_PATH=... or by keeping ThirdParty/JUCE-8.0.15 in place.
+set(FORMULA_JUCE_PATH "" CACHE PATH "Optional path to a local JUCE checkout")
+
+if (FORMULA_JUCE_PATH)
+    add_subdirectory("${FORMULA_JUCE_PATH}" "${CMAKE_BINARY_DIR}/JUCE" EXCLUDE_FROM_ALL)
+elseif (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/JUCE-8.0.15/JUCE/CMakeLists.txt")
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/ThirdParty/JUCE-8.0.15/JUCE"
+                     "${CMAKE_BINARY_DIR}/JUCE" EXCLUDE_FROM_ALL)
+else()
+    include(FetchContent)
+    # Tag 8.0.15 resolves to commit 91ad83ae34a81e0833b1a2b0866f54846370ae53.
+    FetchContent_Declare(JUCE
+        URL https://codeload.github.com/juce-framework/JUCE/tar.gz/refs/tags/8.0.15
+        URL_HASH SHA256=0eafd736286c6e7bb6958d79fce18d42cb654b8e231890d327b7cece379bd156
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(JUCE)
+endif()
 
 juce_add_plugin(FormulaCompressor
     PRODUCT_NAME            "Formula Compressor"

@@ -5,6 +5,7 @@
 #include "state/PresetManager.h"
 
 #include <cmath>
+#include <limits>
 #include <memory>
 
 namespace
@@ -283,6 +284,80 @@ void tests::testProcessor()
         CHECK (processor->setFormula (ampClassic).ok);
     }
 
+    // Pre-1.2 states without xDomain load as AMP.
+    {
+        processor->setFormulaDomain (1);
+        CHECK (processor->setFormula ("min(x, 0.2)").ok);
+
+        auto state = processor->getValueTreeState().copyState();
+        state.removeProperty ("xDomain", nullptr);
+        state.removeProperty ("stateVersion", nullptr);
+
+        auto xml = state.createXml();
+        CHECK (xml != nullptr);
+        juce::MemoryBlock data;
+
+        if (xml != nullptr)
+            juce::AudioProcessor::copyXmlToBinary (*xml, data);
+
+        processor->setStateInformation (data.getData(),
+                                        static_cast<int> (data.getSize()));
+        CHECK (processor->getFormulaDomain() == 0);
+        CHECK (processor->getFormula() == "min(x, 0.2)");
+
+        processor->setFormulaDomain (0);
+        CHECK (processor->setFormula (ampClassic).ok);
+    }
+
+    // Unknown future state versions load best-effort.
+    {
+        CHECK (processor->setFormula ("2 * x").ok);
+
+        auto state = processor->getValueTreeState().copyState();
+        state.setProperty ("stateVersion", 99, nullptr);
+
+        auto xml = state.createXml();
+        CHECK (xml != nullptr);
+        juce::MemoryBlock data;
+
+        if (xml != nullptr)
+            juce::AudioProcessor::copyXmlToBinary (*xml, data);
+
+        processor->setStateInformation (data.getData(),
+                                        static_cast<int> (data.getSize()));
+        CHECK (processor->getFormula() == "2 * x");
+        CHECK (processor->isFormulaValid());
+
+        CHECK (processor->setFormula (ampClassic).ok);
+    }
+
+    // A state restore requests a reset that the audio thread consumes at the
+    // start of the next block, never on the message thread.
+    {
+        processor->setFormulaDomain (1);
+        CHECK (processor->setFormula ("x").ok);
+        processor->setEditorActive (true);
+
+        processConstant (*processor, 0.5f, 60);
+        CHECK (processor->getDetectorLevel() > 0.1f);
+
+        juce::MemoryBlock state;
+        processor->getStateInformation (state);
+
+        const float before = processor->getDetectorLevel();
+        processor->setStateInformation (state.getData(),
+                                        static_cast<int> (state.getSize()));
+        CHECK_CLOSE (processor->getDetectorLevel(), before, 1.0e-6);
+
+        processConstant (*processor, 0.0f, 1);
+        CHECK_CLOSE (processor->getDetectorLevel(), 0.0, 1.0e-6);
+        CHECK (processor->getInputLevelDb() <= -99.0f);
+
+        processor->setEditorActive (false);
+        processor->setFormulaDomain (0);
+        CHECK (processor->setFormula (ampClassic).ok);
+    }
+
     // Scope captures the formula-gain waveform, not Mix or Makeup.
     {
         CHECK (processor->setFormula (ampClassic).ok);
@@ -317,6 +392,70 @@ void tests::testProcessor()
         CHECK (processor->getInputLevelDb() > -20.0f);
         CHECK (processor->getDetectorLevel() > 0.0f);
         processor->setEditorActive (false);
+    }
+
+    // Non-finite input is sanitised for the scope and the output.
+    {
+        CHECK (processor->setFormula (ampClassic).ok);
+        processor->setEditorActive (true);
+
+        juce::AudioBuffer<float> buffer (2, testBlockSize);
+        juce::MidiBuffer midi;
+
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            for (int i = 0; i < testBlockSize; ++i)
+                buffer.setSample (ch, i,
+                                  i % 3 == 0
+                                      ? std::numeric_limits<float>::quiet_NaN()
+                                      : (i % 3 == 1
+                                             ? std::numeric_limits<float>::infinity()
+                                             : -std::numeric_limits<float>::infinity()));
+
+        processor->processBlock (buffer, midi);
+        CHECK (allFinite (buffer));
+
+        const int capacity = FormulaCompressorAudioProcessor::getScopePointCount();
+        const int newest = (processor->getScopeWriteIndex() - 1 + capacity)
+                           % capacity;
+
+        CHECK (std::isfinite (processor->getScopeInputMin (newest)));
+        CHECK (std::isfinite (processor->getScopeInputMax (newest)));
+        CHECK (std::isfinite (processor->getScopeOutputMin (newest)));
+        CHECK (std::isfinite (processor->getScopeOutputMax (newest)));
+        CHECK (std::isfinite (processor->getScopeGainDb (newest)));
+
+        processor->setEditorActive (false);
+    }
+
+    // Re-preparing at a different sample rate is safe.
+    {
+        processor->prepareToPlay (44100.0, testBlockSize);
+        processConstant (*processor, 0.5f, 20);
+        processor->prepareToPlay (96000.0, testBlockSize);
+
+        const float output = processConstant (*processor, 0.5f, 20);
+        CHECK (std::isfinite (output));
+
+        processor->prepareToPlay (testSampleRate, testBlockSize);
+    }
+
+    // Mono processing uses the same engine path.
+    {
+        auto monoProcessor = std::make_unique<FormulaCompressorAudioProcessor>();
+        juce::AudioProcessor::BusesLayout layout;
+        layout.inputBuses.add (juce::AudioChannelSet::mono());
+        layout.outputBuses.add (juce::AudioChannelSet::mono());
+        CHECK (monoProcessor->setBusesLayout (layout));
+        monoProcessor->prepareToPlay (testSampleRate, testBlockSize);
+
+        juce::AudioBuffer<float> buffer (1, testBlockSize);
+        juce::FloatVectorOperations::fill (buffer.getWritePointer (0), 0.5f,
+                                           testBlockSize);
+        juce::MidiBuffer midi;
+        monoProcessor->processBlock (buffer, midi);
+
+        CHECK (allFinite (buffer));
+        CHECK (buffer.getSample (0, testBlockSize - 1) > 0.0f);
     }
 
     // Stress: noise-like input across a few formulas stays finite.

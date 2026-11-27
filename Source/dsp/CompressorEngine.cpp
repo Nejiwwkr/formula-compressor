@@ -1,5 +1,7 @@
 #include "CompressorEngine.h"
 
+#include <juce_audio_basics/juce_audio_basics.h>
+
 #include <limits>
 
 namespace formula
@@ -40,6 +42,8 @@ void CompressorEngine::process (float* const* channels, int numChannels, int num
 {
     if (channels == nullptr || numChannels <= 0 || numSamples <= 0)
         return;
+
+    const juce::ScopedNoDenormals noDenormals;
 
     attackCoefficient = coefficientForMs (parameters.attackMs, sampleRate);
     releaseCoefficient = coefficientForMs (parameters.releaseMs, sampleRate);
@@ -82,6 +86,7 @@ void CompressorEngine::process (float* const* channels, int numChannels, int num
 
     float blockPeakIn = 0.0f;
     float blockPeakOut = 0.0f;
+    float blockMinAbsGain = std::numeric_limits<float>::infinity();
     float lastGain = 1.0f;
 
     for (int sample = 0; sample < numSamples; ++sample)
@@ -91,7 +96,10 @@ void CompressorEngine::process (float* const* channels, int numChannels, int num
 
         for (int channel = 0; channel < numChannels; ++channel)
         {
-            const float value = channels[channel][sample];
+            const float raw = channels[channel][sample];
+            const float value = std::isfinite (raw)
+                                    ? std::clamp (raw, -1.0e6f, 1.0e6f)
+                                    : 0.0f;
             peak = std::max (peak, std::abs (value));
             meanSquare += value * value;
         }
@@ -181,6 +189,8 @@ void CompressorEngine::process (float* const* channels, int numChannels, int num
         if (std::abs (gain) < 1.0e-9f)
             gain = 0.0f;
 
+        blockMinAbsGain = std::min (blockMinAbsGain, std::abs (gain));
+
         if (sample < captureSize)
             gainCapture[static_cast<std::size_t> (sample)] = gain;
 
@@ -192,11 +202,15 @@ void CompressorEngine::process (float* const* channels, int numChannels, int num
         for (int channel = 0; channel < numChannels; ++channel)
         {
             float* data = channels[channel];
-            const float dry = data[sample];
+            const float rawDry = data[sample];
+            const float dry = std::isfinite (rawDry) ? rawDry : 0.0f;
             const float wet = dry * wetGain;
 
             float output = dry + (wet - dry) * mix;
             output = output * (1.0f - bypass) + dry * bypass;
+
+            if (! std::isfinite (output))
+                output = 0.0f;
 
             data[sample] = output;
             blockPeakOut = std::max (blockPeakOut, std::abs (output));
@@ -210,7 +224,10 @@ void CompressorEngine::process (float* const* channels, int numChannels, int num
     if (parameters.meterActive)
     {
         lastEnvelope.store (envelope, std::memory_order_relaxed);
-        gainReductionDb.store (gainToDb (std::abs (lastGain)), std::memory_order_relaxed);
+        gainReductionDb.store (std::isfinite (blockMinAbsGain)
+                                   ? gainToDb (blockMinAbsGain)
+                                   : 0.0f,
+                               std::memory_order_relaxed);
         inputLevelDb.store (blockPeakIn > 0.0f ? gainToDb (blockPeakIn) : -100.0f,
                             std::memory_order_relaxed);
         outputLevelDb.store (blockPeakOut > 0.0f ? gainToDb (blockPeakOut) : -100.0f,

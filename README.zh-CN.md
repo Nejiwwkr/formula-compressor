@@ -1,5 +1,7 @@
 # Formula Compressor（公式压缩器）
 
+[![Build](https://github.com/Nejiwwkr/formula-compressor/actions/workflows/build.yml/badge.svg)](https://github.com/Nejiwwkr/formula-compressor/actions/workflows/build.yml)
+
 **把压缩曲线写成公式。**
 
 传统压缩器的静态传输曲线通常写作 `f(x) = min(x, ax + b)`。Formula Compressor
@@ -8,9 +10,14 @@
 
 ![界面](Docs/ui-level.png)
 
+Windows x64 构建发布在
+[Releases](https://github.com/Nejiwwkr/formula-compressor/releases/latest) 页面，
+包含 VST3、独立程序、安装说明与 SHA-256 校验文件。二进制未做代码签名，
+SmartScreen 可能提示未知发布者。
+
 ## 工作原理
 
-- 立体声联动检波（Peak 或 RMS，RMS 窗口 10 ms）。
+- 立体声联动检波（Peak 或 RMS；RMS 使用 10 ms 一阶均方时间常数）。
 - Attack / Release / Hold 平滑检波包络 `e`。
 - 公式左侧的 `x:` 开关决定 x 的含义：
   - **AMP**：`x = e`（线性幅度），`f(x)` 返回线性幅度，`gain = f(x)/e`。
@@ -114,7 +121,7 @@ x < -40 ? -120 : x                          -40 dBFS 以下静音
 | Mix | 0–100% | 100% | 干湿混合 |
 | Input Gain | -24..+24 dB | 0 dB | 检波前输入增益 |
 | Makeup | -12..+24 dB | 0 dB | 输出补偿 |
-| Detector | Peak / RMS | Peak | RMS 窗口 10 ms |
+| Detector | Peak / RMS | Peak | RMS 使用 10 ms 一阶均方时间常数 |
 | P1–P4 | -1..+1 | 0.25, 0.25, 0, 0 | 公式变量 |
 | Bypass | 开 / 关 | 关 | 宿主 Bypass 参数 |
 
@@ -133,8 +140,11 @@ Expander / Gate、Tanh Comp、Log Comp、Two Stage。
 
 ## 构建与测试
 
+需要 Visual Studio 2022（Desktop C++）与 CMake 3.24+。CMake 会自动下载固定版本的
+JUCE 8.0.15；离线时可加 `-DFORMULA_JUCE_PATH=C:\path\to\JUCE`，或保留本地
+`ThirdParty/JUCE-8.0.15`。
+
 ```powershell
-# JUCE 解压到 ThirdParty/JUCE-8.0.15（若尚未解压）
 cmake -S . -B Build -G "Visual Studio 17 2022" -A x64
 cmake --build Build --config Release --target FormulaCompressor_VST3 FormulaCompressor_Standalone FormulaCompressorTests --parallel
 .\Build\FormulaCompressorTests_artefacts\Release\FormulaCompressorTests.exe
@@ -148,6 +158,14 @@ powershell -ExecutionPolicy Bypass -File Tools\run_pluginval.ps1 -SkipGuiTests
   `--screenshot Docs/ui-dbfs.png level "min(x, -12 + (x + 12) / 4)" db`。
 - 安装 VST3：`powershell -ExecutionPolicy Bypass -File Tools\install_vst3.ps1`
   （加 `-System` 安装到公共目录）。
+
+## 许可证
+
+Formula Compressor 使用 GNU Affero General Public License v3.0（AGPL-3.0）。
+项目以 JUCE 8 的 AGPLv3 方式分发，不包含 JUCE 商业许可；每个发布版本对应的源码
+就是本仓库的相应 tag。JUCE 与随附依赖的声明见
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)，完整许可证文本见
+[LICENSE](LICENSE)。
 
 ## 说明
 

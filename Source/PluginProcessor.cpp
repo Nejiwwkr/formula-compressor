@@ -173,23 +173,20 @@ FormulaCompressorAudioProcessor::FormulaCompressorAudioProcessor()
         if (lastCompile.ok)
             publishProgramLocked (lastCompile.program);
     }
-
-    startTimer (500);
 }
 
 FormulaCompressorAudioProcessor::~FormulaCompressorAudioProcessor()
 {
-    stopTimer();
-
     const juce::ScopedLock lock (programLock);
     publishedProgram.store (nullptr, std::memory_order_release);
-    retiredPrograms.clear();
+    programHistory.clear();
     liveProgram.reset();
 }
 
 void FormulaCompressorAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     engine.prepare (sampleRate, samplesPerBlock);
+    engineResetRequested.store (false, std::memory_order_relaxed);
     setLatencySamples (0);
 
     inputGainSmoother.reset (sampleRate, 0.02);
@@ -334,6 +331,10 @@ void FormulaCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
     if (numSamples <= 0 || processedChannels <= 0)
         return;
 
+    // State restores only publish a request; the audio thread owns the reset.
+    if (engineResetRequested.exchange (false, std::memory_order_acq_rel))
+        engine.reset();
+
     formula::EngineParameters parameters;
     loadEngineParameters (parameters);
     parameters.bypassed = bypassParam != nullptr && bypassParam->load() >= 0.5f;
@@ -366,9 +367,11 @@ void FormulaCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
 
         for (int sample = 0; sample < numSamples; ++sample)
         {
+            const float mono = right != nullptr
+                                   ? 0.5f * (left[sample] + right[sample])
+                                   : left[sample];
             scopeInputBuffer[static_cast<std::size_t> (sample)] =
-                right != nullptr ? 0.5f * (left[sample] + right[sample])
-                                 : left[sample];
+                std::isfinite (mono) ? mono : 0.0f;
         }
     }
 
@@ -521,21 +524,23 @@ void FormulaCompressorAudioProcessor::setStateInformation (const void* data, int
     if (! newState.isValid())
         return;
 
+    const int loadedVersion = static_cast<int> (newState.getProperty ("stateVersion", 1));
+
+    if (loadedVersion < 3 && ! newState.hasProperty ("xDomain"))
+        newState.setProperty ("xDomain", 0, nullptr);
+
+    if (! newState.hasProperty ("formula"))
+        newState.setProperty ("formula", getDefaultFormulaText(), nullptr);
+
     apvts.replaceState (newState);
     apvts.state.setProperty ("stateVersion", getStateVersion(), nullptr);
-
-    if (! apvts.state.hasProperty ("formula"))
-        apvts.state.setProperty ("formula", getDefaultFormulaText(), nullptr);
-
-    if (! apvts.state.hasProperty ("xDomain"))
-        apvts.state.setProperty ("xDomain", 0, nullptr);
 
     formulaDomain.store (juce::jlimit (0, 1,
                            static_cast<int> (apvts.state.getProperty ("xDomain", 0))),
                          std::memory_order_relaxed);
 
-    engine.reset();
     applyFormulaFromState();
+    engineResetRequested.store (true, std::memory_order_release);
 }
 
 void FormulaCompressorAudioProcessor::applyFormulaFromState()
@@ -565,30 +570,10 @@ void FormulaCompressorAudioProcessor::publishProgramLocked (const formula::Progr
     auto newProgram = std::make_shared<const formula::Program> (program);
 
     if (liveProgram != nullptr)
-        retiredPrograms.push_back ({ liveProgram, juce::Time::getMillisecondCounter() });
+        programHistory.push_back (liveProgram);
 
     liveProgram = newProgram;
     publishedProgram.store (newProgram.get(), std::memory_order_release);
-}
-
-void FormulaCompressorAudioProcessor::retireOldProgramsLocked()
-{
-    const auto now = juce::Time::getMillisecondCounter();
-
-    const auto keep = std::remove_if (
-        retiredPrograms.begin(), retiredPrograms.end(),
-        [now] (const RetiredProgram& retired)
-        {
-            return static_cast<std::uint32_t> (now - retired.stampMs) > 1000u;
-        });
-
-    retiredPrograms.erase (keep, retiredPrograms.end());
-}
-
-void FormulaCompressorAudioProcessor::timerCallback()
-{
-    const juce::ScopedLock lock (programLock);
-    retireOldProgramsLocked();
 }
 
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
