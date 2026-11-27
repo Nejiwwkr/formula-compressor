@@ -572,6 +572,7 @@ void tests::testProcessor()
         layout.outputBuses.add (juce::AudioChannelSet::stereo());
         CHECK (scProcessor->setBusesLayout (layout));
         scProcessor->prepareToPlay (testSampleRate, testBlockSize);
+        scProcessor->setEditorActive (true);
         scProcessor->setFormulaDomain (1);
         CHECK (scProcessor->setFormula ("x - max(0, s + 60) / 4").ok);
         scProcessor->setParameterValue ("attack", 0.5f);
@@ -602,6 +603,11 @@ void tests::testProcessor()
         CHECK_CLOSE (buffer.getSample (4, 0), 0.5f, 1.0e-6);
         CHECK_CLOSE (buffer.getSample (5, 0), 0.5f, 1.0e-6);
 
+        CHECK (scProcessor->getSelectedSidechain() == 2);
+        CHECK (scProcessor->isSidechainAvailable (2));
+        CHECK (scProcessor->isSidechainActiveForDisplay());
+        CHECK_CLOSE (scProcessor->getSidechainValueForFormula(), -6.0206, 1.5);
+
         // Selecting the silent SC1 drops s and releases the main path.
         scProcessor->setParameterValue ("scInput", 1.0f);
 
@@ -623,6 +629,9 @@ void tests::testProcessor()
         }
 
         CHECK_CLOSE (buffer.getSample (0, testBlockSize - 1), 0.5f, 0.03f);
+        CHECK (scProcessor->getSelectedSidechain() == 1);
+        CHECK (scProcessor->getSidechainValueForFormula() < -100.0f);
+        scProcessor->setEditorActive (false);
     }
 
     // Stress: noise-like input across a few formulas stays finite.
