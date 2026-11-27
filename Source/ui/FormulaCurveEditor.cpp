@@ -56,6 +56,8 @@ FormulaCurveEditor::FormulaCurveEditor (FormulaCompressorAudioProcessor& process
     program = processorRef.getActiveProgram();
     formulaDomain = processorRef.getFormulaDomain();
     liveInputLinear = processorRef.getDetectorLevel();
+    sidechainValue = processorRef.getSidechainValueForFormula();
+    sidechainActive = processorRef.isSidechainActiveForDisplay();
 
     for (int i = 0; i < 4; ++i)
         pValues[static_cast<std::size_t> (i)] = processorRef.getPValue (i + 1);
@@ -179,7 +181,8 @@ float FormulaCurveEditor::screenToInputValue (float x, juce::Rectangle<float> pl
 }
 
 FormulaCurveEditor::CurveValue FormulaCurveEditor::makeValue (float inputLinear,
-                                                              float inputDb) const
+                                                              float inputDb,
+                                                              float sValue) const
 {
     CurveValue value;
 
@@ -189,7 +192,8 @@ FormulaCurveEditor::CurveValue FormulaCurveEditor::makeValue (float inputLinear,
     if (formulaDomain == 1)
     {
         const float outputDb = program != nullptr && program->valid
-                                   ? program->eval (value.inputDb, pValues[0], pValues[1],
+                                   ? program->eval (value.inputDb, sValue,
+                                                    pValues[0], pValues[1],
                                                     pValues[2], pValues[3])
                                    : value.inputDb;
 
@@ -215,7 +219,8 @@ FormulaCurveEditor::CurveValue FormulaCurveEditor::makeValue (float inputLinear,
     else
     {
         const float output = program != nullptr && program->valid
-                                 ? program->eval (value.inputLinear, pValues[0], pValues[1],
+                                 ? program->eval (value.inputLinear, sValue,
+                                                  pValues[0], pValues[1],
                                                   pValues[2], pValues[3])
                                  : value.inputLinear;
 
@@ -310,7 +315,7 @@ void FormulaCurveEditor::rebuildCurve()
             inputLinear = dbToGain (viewValue);
         }
 
-        const auto value = makeValue (inputLinear, inputDb);
+        const auto value = makeValue (inputLinear, inputDb, sidechainValue);
 
         Sample sample;
         sample.inputLinear = value.inputLinear;
@@ -468,7 +473,7 @@ juce::String FormulaCurveEditor::getModeTitle() const
     switch (mode)
     {
         case ViewMode::Level:  return "TRANSFER  |  LEVEL";
-        case ViewMode::Gain:   return "GAIN  |  f(x)/x";
+        case ViewMode::Gain:   return "GAIN  |  f(x,s)/x";
         case ViewMode::Linear: return "TRANSFER  |  LINEAR";
     }
 
@@ -505,7 +510,8 @@ void FormulaCurveEditor::paint (juce::Graphics& g)
                       juce::Rectangle<float> (layout.header.getX(), layout.header.getY(),
                                               juce::jmax (60.0f,
                                                           layout.header.getRight()
-                                                              - 178.0f - layout.header.getX()),
+                                                              - 178.0f
+                                                              - layout.header.getX()),
                                               layout.header.getHeight())
                           .toNearestInt(),
                       juce::Justification::centredLeft, 1, 0.75f);
@@ -570,7 +576,7 @@ void FormulaCurveEditor::paint (juce::Graphics& g)
     {
         const float inputLinear = liveInputLinear;
         const float inputDb = inputLinear > 1.0e-6f ? gainToDb (inputLinear) : -120.0f;
-        const auto value = makeValue (inputLinear, inputDb);
+        const auto value = makeValue (inputLinear, inputDb, sidechainValue);
 
         if (value.valid && inputLinear > 1.0e-6f)
         {
@@ -614,7 +620,7 @@ void FormulaCurveEditor::paint (juce::Graphics& g)
             inputLinear = dbToGain (viewValue);
         }
 
-        const auto value = makeValue (inputLinear, inputDb);
+        const auto value = makeValue (inputLinear, inputDb, sidechainValue);
 
         if (value.valid)
         {
@@ -653,7 +659,21 @@ void FormulaCurveEditor::timerCallback()
     if (domain != formulaDomain)
     {
         formulaDomain = domain;
+        sidechainValue = processorRef.getSidechainValueForFormula();
         needsRebuild = true;
+    }
+
+    const float newSidechainValue = processorRef.getSidechainValueForFormula();
+    const bool newSidechainActive = processorRef.isSidechainActiveForDisplay();
+
+    if (newSidechainActive != sidechainActive
+        || std::abs (newSidechainValue - sidechainValue) > 1.0e-4f)
+    {
+        sidechainValue = newSidechainValue;
+        sidechainActive = newSidechainActive;
+
+        if (active != nullptr && active->usesSidechain)
+            needsRebuild = true;
     }
 
     for (int i = 0; i < 4; ++i)
@@ -685,6 +705,8 @@ void FormulaCurveEditor::changeListenerCallback (juce::ChangeBroadcaster*)
     program = processorRef.getActiveProgram();
     formulaDomain = processorRef.getFormulaDomain();
     liveInputLinear = processorRef.getDetectorLevel();
+    sidechainValue = processorRef.getSidechainValueForFormula();
+    sidechainActive = processorRef.isSidechainActiveForDisplay();
 
     for (int i = 0; i < 4; ++i)
         pValues[static_cast<std::size_t> (i)] = processorRef.getPValue (i + 1);

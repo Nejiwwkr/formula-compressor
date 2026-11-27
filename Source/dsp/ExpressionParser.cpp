@@ -522,6 +522,13 @@ private:
                     return parseFunctionCall (name, token);
 
                 if (name == "x")  return emit (Op::PushX);
+
+                if (name == "s")
+                {
+                    program.usesSidechain = true;
+                    return emit (Op::PushS);
+                }
+
                 if (name == "p1") return emit (Op::PushP1);
                 if (name == "p2") return emit (Op::PushP2);
                 if (name == "p3") return emit (Op::PushP3);
@@ -624,11 +631,15 @@ CompileResult compileExpression (const juce::String& text)
     expression = expression.substring (leading);
     offset += leading;
 
-    // Accept the optional "f(x) = " or "y = " prefix.
+    // Accept the optional "f(x) = ", "f(x,s) = " or "y = " prefix.
     const auto lower = expression.toLowerCase();
     int prefixLength = -1;
 
-    if (lower.startsWith ("f(x)"))
+    if (lower.startsWith ("f(x,s)"))
+        prefixLength = 6;
+    else if (lower.startsWith ("f(x, s)"))
+        prefixLength = 7;
+    else if (lower.startsWith ("f(x)"))
         prefixLength = 4;
     else if (lower.startsWith ("y"))
         prefixLength = 1;
@@ -699,7 +710,8 @@ juce::String functionReference()
 {
     return juce::String (
         "VARIABLES\n"
-        "  x             input level, linear amplitude (0..1; may exceed 1)\n"
+        "  x             main input detector level\n"
+        "  s             selected sidechain detector level, same domain as x\n"
         "  P1..P4        the four P knobs (-1..+1)\n"
         "  pi, e         constants\n\n"
         "OPERATORS\n"
@@ -717,12 +729,17 @@ juce::String functionReference()
         "  rand()        uniform random in [0,1)\n"
         "  if(c,a,b)     same as c ? a : b\n\n"
         "X DOMAIN (the AMP / dBFS switch)\n"
-        "  AMP           x is linear amplitude, f(x) returns linear amplitude\n"
-        "  dBFS          x is level in dBFS, f(x) returns dBFS; gain dB = f(x) - x\n"
-        "  in dBFS mode  f(x) = 0 means 0 dB (unity), not silence; use -120 for mute\n\n"
+        "  AMP           x and s are linear amplitudes, f returns linear amplitude\n"
+        "  dBFS          x and s are dBFS, f returns dBFS; gain dB = f(x,s) - x\n"
+        "  in dBFS mode  f = 0 means 0 dB (unity), not silence; use -120 for mute\n\n"
+        "SIDECHAIN s\n"
+        "  no sidechain  AMP: s = 0;  dBFS: s = -120\n"
+        "  dBFS          s is negative; duck with x - max(0, s + threshold) / ratio\n"
+        "  AMP           s is 0..1; x - s/10 is neutral when s is 0\n"
+        "  the curve view shows f(x,s) at the current s; the S readout shows it\n\n"
         "POLARITY AND SILENCE (AMP mode)\n"
-        "  f(x) < 0      negative gain: both channels are polarity inverted (dashed)\n"
-        "  f(x) = 0      true silence; gain magnitude is clamped to +24 dB\n"
+        "  f(x,s) < 0    negative gain: both channels are polarity inverted (dashed)\n"
+        "  f(x,s) = 0    true silence; gain magnitude is clamped to +24 dB\n"
         "  mix < 100%    an inverted gain partially cancels the dry signal\n\n"
         "VIEWS\n"
         "  LEVEL         input/output level in dB, equal scale, unity is 45 deg\n"
@@ -731,6 +748,8 @@ juce::String functionReference()
         "EXAMPLES\n"
         "  min(x, P1 + (x - P1) * P2)     classic compression, x in AMP\n"
         "  min(x, -12 + (x + 12) / 4)     classic 4:1, x in dBFS\n"
+        "  x - max(0, s + 60) / 4         sidechain duck, dBFS\n"
+        "  x * (1 - 0.8 * min(s, 1))      sidechain duck, AMP\n"
         "  x < -30 ? x : mix(x, -24 + (x + 24) / 4, smoothstep(-30, -24, x))\n"
         "  -0.5 * x                       -6 dB and polarity inverted (AMP)\n");
 }

@@ -111,6 +111,45 @@ FormulaCompressorAudioProcessor::createParameterLayout()
         juce::AudioParameterChoiceAttributes().withStringFromValueFunction (
             [] (int index, int) { return index == 1 ? "RMS" : "Peak"; })));
 
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "scInput", 1 },
+        "Sidechain Input",
+        juce::StringArray { "Off", "SC1", "SC2", "SC3", "SC4" },
+        0));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "scHpf", 1 },
+        "Sidechain HPF",
+        juce::NormalisableRange<float> (0.0f, 500.0f, 1.0f, 0.4f),
+        0.0f,
+        juce::AudioParameterFloatAttributes()
+            .withStringFromValueFunction ([] (float value, int)
+            {
+                return value <= 0.5f ? juce::String ("OFF")
+                                     : juce::String (juce::roundToInt (value)) + " Hz";
+            })));
+
+    layout.add (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "stereoLink", 1 },
+        "Stereo Link",
+        juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f),
+        1.0f,
+        juce::AudioParameterFloatAttributes()
+            .withStringFromValueFunction ([] (float value, int)
+            {
+                return percentToString (value);
+            })
+            .withValueFromStringFunction ([] (const juce::String& text)
+            {
+                return juce::jlimit (0.0f, 1.0f, text.getFloatValue() * 0.01f);
+            })));
+
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { "monitor", 1 },
+        "Monitor",
+        juce::StringArray { "Off", "Delta", "Sidechain" },
+        0));
+
     const float pDefaults[4] = { 0.25f, 0.25f, 0.0f, 0.0f };
 
     for (int i = 0; i < 4; ++i)
@@ -147,7 +186,11 @@ juce::String FormulaCompressorAudioProcessor::getDefaultFormulaText()
 FormulaCompressorAudioProcessor::FormulaCompressorAudioProcessor()
     : AudioProcessor (BusesProperties()
                           .withInput ("Input", juce::AudioChannelSet::stereo(), true)
-                          .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
+                          .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
+                          .withInput ("Sidechain 1", juce::AudioChannelSet::stereo(), false)
+                          .withInput ("Sidechain 2", juce::AudioChannelSet::stereo(), false)
+                          .withInput ("Sidechain 3", juce::AudioChannelSet::stereo(), false)
+                          .withInput ("Sidechain 4", juce::AudioChannelSet::stereo(), false)),
       apvts (*this, nullptr, "PARAMETERS", createParameterLayout())
 {
     attackParam = apvts.getRawParameterValue ("attack");
@@ -157,6 +200,10 @@ FormulaCompressorAudioProcessor::FormulaCompressorAudioProcessor()
     mixParam = apvts.getRawParameterValue ("mix");
     makeupParam = apvts.getRawParameterValue ("makeup");
     detectorParam = apvts.getRawParameterValue ("detector");
+    scInputParam = apvts.getRawParameterValue ("scInput");
+    scHpfParam = apvts.getRawParameterValue ("scHpf");
+    stereoLinkParam = apvts.getRawParameterValue ("stereoLink");
+    monitorParam = apvts.getRawParameterValue ("monitor");
     bypassParam = apvts.getRawParameterValue ("bypass");
 
     for (int i = 0; i < 4; ++i)
@@ -281,13 +328,68 @@ void FormulaCompressorAudioProcessor::releaseResources()
 
 bool FormulaCompressorAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    const auto output = layouts.getMainOutputChannelSet();
+    const auto& layoutInputs = layouts.getBuses (true);
+    const auto& layoutOutputs = layouts.getBuses (false);
 
-    if (output != juce::AudioChannelSet::mono()
-        && output != juce::AudioChannelSet::stereo())
+    if (layoutInputs.isEmpty() || layoutOutputs.isEmpty())
         return false;
 
-    return output == layouts.getMainInputChannelSet();
+    if (layoutInputs.size() > 5 || layoutOutputs.size() > 1)
+        return false;
+
+    const auto mainIn = layouts.getMainInputChannelSet();
+    const auto mainOut = layouts.getMainOutputChannelSet();
+
+    if (mainIn.isDisabled() || mainIn != mainOut)
+        return false;
+
+    if (mainOut != juce::AudioChannelSet::mono()
+        && mainOut != juce::AudioChannelSet::stereo())
+        return false;
+
+    for (int bus = 1; bus < layoutInputs.size(); ++bus)
+    {
+        const auto channels = layouts.getNumChannels (true, bus);
+
+        if (channels != 0 && channels != mainOut.size())
+            return false;
+    }
+
+    return true;
+}
+
+bool FormulaCompressorAudioProcessor::isSidechainAvailable (int sidechainIndex) const noexcept
+{
+    if (sidechainIndex < 1 || sidechainIndex > 4)
+        return false;
+
+    const auto* bus = getBus (true, sidechainIndex);
+    return bus != nullptr
+           && bus->isEnabled()
+           && bus->getNumberOfChannels() > 0;
+}
+
+int FormulaCompressorAudioProcessor::getSelectedSidechain() const noexcept
+{
+    return scInputParam != nullptr
+               ? juce::jlimit (0, 4, juce::roundToInt (scInputParam->load()))
+               : 0;
+}
+
+float FormulaCompressorAudioProcessor::getSidechainValueForFormula() const noexcept
+{
+    const float envelope = engine.getSidechainEnvelope();
+
+    if (getFormulaDomain() == 1)
+        return 20.0f * std::log10 (std::max (envelope, 1.0e-6f));
+
+    return envelope;
+}
+
+bool FormulaCompressorAudioProcessor::isSidechainActiveForDisplay() const noexcept
+{
+    const int selected = getSelectedSidechain();
+    return selected > 0 && isSidechainAvailable (selected);
 }
 
 juce::AudioProcessorParameter* FormulaCompressorAudioProcessor::getBypassParameter() const
@@ -310,6 +412,9 @@ void FormulaCompressorAudioProcessor::loadEngineParameters (formula::EngineParam
     parameters.makeupDb = value (makeupParam, 0.0f);
     parameters.detectorMode = juce::roundToInt (value (detectorParam, 0.0f));
     parameters.xDomain = formulaDomain.load (std::memory_order_relaxed);
+    parameters.stereoLink = value (stereoLinkParam, 1.0f);
+    parameters.scHpfHz = value (scHpfParam, 0.0f);
+    parameters.monitorMode = juce::roundToInt (value (monitorParam, 0.0f));
     parameters.p1 = value (pParams[0], 0.25f);
     parameters.p2 = value (pParams[1], 0.25f);
     parameters.p3 = value (pParams[2], 0.0f);
@@ -322,13 +427,16 @@ void FormulaCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
     juce::ScopedNoDenormals noDenormals;
 
     const int numSamples = buffer.getNumSamples();
-    const int totalChannels = buffer.getNumChannels();
-    const int processedChannels = juce::jmin (totalChannels, 2);
 
-    for (int channel = processedChannels; channel < totalChannels; ++channel)
-        buffer.clear (channel, 0, numSamples);
+    if (numSamples <= 0)
+        return;
 
-    if (numSamples <= 0 || processedChannels <= 0)
+    // The process buffer contains the main bus plus any enabled aux inputs.
+    // Never clear or write the aux channels: the host may own them read-only.
+    auto mainIO = getBusBuffer (buffer, true, 0);
+    const int mainChannels = juce::jlimit (0, 2, mainIO.getNumChannels());
+
+    if (mainChannels <= 0 || mainIO.getNumSamples() < numSamples)
         return;
 
     // State restores only publish a request; the audio thread owns the reset.
@@ -339,6 +447,24 @@ void FormulaCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
     loadEngineParameters (parameters);
     parameters.bypassed = bypassParam != nullptr && bypassParam->load() >= 0.5f;
     parameters.meterActive = isEditorActive();
+
+    const int scInput = juce::jlimit (0, 4,
+        scInputParam != nullptr
+            ? juce::roundToInt (scInputParam->load())
+            : 0);
+
+    const float* sidechainPointers[2] { nullptr, nullptr };
+    int sidechainChannels = 0;
+
+    if (scInput > 0
+        && getChannelCountOfBus (true, scInput) == mainChannels)
+    {
+        auto sidechainBuffer = getBusBuffer (buffer, true, scInput);
+        sidechainChannels = juce::jlimit (0, 2, sidechainBuffer.getNumChannels());
+
+        for (int channel = 0; channel < sidechainChannels; ++channel)
+            sidechainPointers[channel] = sidechainBuffer.getReadPointer (channel);
+    }
 
     // Input trim is part of the compressor path; bypass ramps it out too.
     const float inputTarget = parameters.bypassed
@@ -353,8 +479,8 @@ void FormulaCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
     {
         const float gain = inputGainSmoother.getNextValue();
 
-        for (int channel = 0; channel < processedChannels; ++channel)
-            buffer.getWritePointer (channel)[sample] *= gain;
+        for (int channel = 0; channel < mainChannels; ++channel)
+            mainIO.getWritePointer (channel)[sample] *= gain;
     }
 
     const bool scopeActive = isEditorActive()
@@ -362,8 +488,8 @@ void FormulaCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
 
     if (scopeActive)
     {
-        const float* left = buffer.getReadPointer (0);
-        const float* right = processedChannels > 1 ? buffer.getReadPointer (1) : nullptr;
+        const float* left = mainIO.getReadPointer (0);
+        const float* right = mainChannels > 1 ? mainIO.getReadPointer (1) : nullptr;
 
         for (int sample = 0; sample < numSamples; ++sample)
         {
@@ -376,7 +502,9 @@ void FormulaCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
     }
 
     engine.setProgram (publishedProgram.load (std::memory_order_acquire));
-    engine.process (buffer.getArrayOfWritePointers(), processedChannels, numSamples, parameters);
+    engine.process (mainIO.getArrayOfWritePointers(), mainChannels, numSamples,
+                    sidechainChannels > 0 ? sidechainPointers : nullptr,
+                    sidechainChannels, parameters);
 
     if (scopeActive)
     {
@@ -534,6 +662,16 @@ void FormulaCompressorAudioProcessor::setStateInformation (const void* data, int
 
     apvts.replaceState (newState);
     apvts.state.setProperty ("stateVersion", getStateVersion(), nullptr);
+
+    if (loadedVersion < 4)
+    {
+        // Missing APVTS children keep the instance's current values on
+        // replaceState, so old projects must be reset explicitly.
+        setParameterValue ("scInput", 0.0f);
+        setParameterValue ("scHpf", 0.0f);
+        setParameterValue ("stereoLink", 1.0f);
+        setParameterValue ("monitor", 0.0f);
+    }
 
     formulaDomain.store (juce::jlimit (0, 1,
                            static_cast<int> (apvts.state.getProperty ("xDomain", 0))),

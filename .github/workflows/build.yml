@@ -42,7 +42,9 @@ jobs:
         run: .\Build\FormulaCompressorTests_artefacts\Release\FormulaCompressorTests.exe
 
       - name: UI screenshot smoke test
-        run: .\Build\FormulaCompressorTests_artefacts\Release\FormulaCompressorTests.exe --screenshot Build\ci-ui.png level
+        run: |
+          .\Build\FormulaCompressorTests_artefacts\Release\FormulaCompressorTests.exe --screenshot Build\ci-ui.png level
+          .\Build\FormulaCompressorTests_artefacts\Release\FormulaCompressorTests.exe --screenshot Build\ci-ui-900.png level --size 900x680
 
       - name: Run pluginval
         shell: pwsh
@@ -85,6 +87,7 @@ jobs:
             configure.log
             Build/pluginval/pluginval.log
             Build/ci-ui.png
+            Build/ci-ui-900.png
           if-no-files-found: ignore
 
   release:

@@ -23,6 +23,21 @@ float eval (const juce::String& text, float x = 0.0f,
     return result.program.eval (x, p1, p2, p3, p4);
 }
 
+float evalS (const juce::String& text, float x, float s,
+             float p1 = 0.0f, float p2 = 0.0f, float p3 = 0.0f, float p4 = 0.0f)
+{
+    const auto result = formula::compileExpression (text);
+
+    if (! result.ok)
+    {
+        tests::report (false, "compile", __FILE__, __LINE__,
+                       text + " -> " + result.error);
+        return std::nanf ("");
+    }
+
+    return result.program.eval (x, s, p1, p2, p3, p4);
+}
+
 void expectError (const juce::String& text, int expectedColumn = -1)
 {
     const auto result = formula::compileExpression (text);
@@ -58,6 +73,23 @@ void tests::testExpression()
 
     // Variables, parameters and constants.
     CHECK_CLOSE (eval ("P1 * 10 + p2", 0.0f, 0.25f, 0.5f), 3.0, 1.0e-5);
+
+    // Sidechain variable s and its usesSidechain flag.
+    {
+        const auto withS = formula::compileExpression ("x - s / 10");
+        CHECK (withS.ok);
+        CHECK (withS.program.usesSidechain);
+        CHECK_CLOSE (withS.program.eval (0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f),
+                     0.46, 1.0e-5);
+        CHECK_CLOSE (withS.program.eval (0.5f, 0.0f, 0.0f, 0.0f, 0.0f),
+                     0.5, 1.0e-5);
+
+        const auto withoutS = formula::compileExpression ("x * 2");
+        CHECK (withoutS.ok);
+        CHECK (! withoutS.program.usesSidechain);
+
+        CHECK_CLOSE (evalS ("s", 0.2f, 0.7f), 0.7, 1.0e-5);
+    }
     CHECK_CLOSE (eval ("x * 3", 0.25f), 0.75, 1.0e-5);
     CHECK_CLOSE (eval ("pi"), kPi, 1.0e-5);
     CHECK_CLOSE (eval ("e"), 2.718281828, 1.0e-5);
@@ -115,6 +147,8 @@ void tests::testExpression()
 
     // Optional prefix.
     CHECK_CLOSE (eval ("f(x) = 2 * x", 3.0f), 6.0, 1.0e-5);
+    CHECK_CLOSE (evalS ("f(x,s) = x + s", 2.0f, 0.5f), 2.5, 1.0e-5);
+    CHECK_CLOSE (evalS ("f(x, s) = x + s", 2.0f, 0.5f), 2.5, 1.0e-5);
     CHECK_CLOSE (eval ("y = x + 1", 3.0f), 4.0, 1.0e-5);
     CHECK_CLOSE (eval ("f(x)=min(x, 0.25)", 0.5f), 0.25, 1.0e-5);
 

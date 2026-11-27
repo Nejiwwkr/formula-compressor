@@ -31,6 +31,22 @@ StereoResult runEngine (formula::CompressorEngine& engine,
     return result;
 }
 
+StereoResult runWithSidechain (formula::CompressorEngine& engine,
+                               const formula::EngineParameters& parameters,
+                               float mainValue, float sidechainValue, int numSamples)
+{
+    StereoResult result;
+    result.left.assign (static_cast<std::size_t> (numSamples), mainValue);
+    result.right.assign (static_cast<std::size_t> (numSamples), mainValue);
+
+    std::vector<float> sidechain (static_cast<std::size_t> (numSamples), sidechainValue);
+    float* audio[2] = { result.left.data(), result.right.data() };
+    const float* detector[2] = { sidechain.data(), sidechain.data() };
+
+    engine.process (audio, 2, numSamples, detector, 2, parameters);
+    return result;
+}
+
 struct Rig
 {
     formula::CompressorEngine engine;
@@ -152,6 +168,108 @@ void tests::testEngine()
         const auto result = rig.run (0.5f, samplesForMs (200.0), 0.05f);
         CHECK_CLOSE (result.left.back(), 0.25, 2.0e-3);
         CHECK_CLOSE (result.right.back(), 0.025, 2.0e-4);
+    }
+
+    // LINK=0 is dual mono: the quiet channel is not compressed by the loud one.
+    {
+        Rig rig ("min(x, 0.25)");
+        rig.parameters.attackMs = 1.0f;
+        rig.parameters.stereoLink = 0.0f;
+
+        const auto result = rig.run (0.5f, samplesForMs (200.0), 0.05f);
+        CHECK_CLOSE (result.left.back(), 0.25, 2.0e-3);
+        CHECK_CLOSE (result.right.back(), 0.05, 2.0e-3);
+    }
+
+    // Partial link sits between the two.
+    {
+        Rig rig ("min(x, 0.25)");
+        rig.parameters.attackMs = 1.0f;
+        rig.parameters.stereoLink = 0.5f;
+
+        const auto result = rig.run (0.5f, samplesForMs (200.0), 0.05f);
+        CHECK (result.right.back() > 0.025f);
+        CHECK (result.right.back() < 0.05f);
+    }
+
+    // Sidechain s uses the same domain as x, and f(x,s) can duck the main path.
+    {
+        Rig rig ("x - max(0, s + 60) / 4");
+        rig.parameters.xDomain = 1;
+        rig.parameters.attackMs = 0.5f;
+
+        const auto loud = runWithSidechain (rig.engine, rig.parameters, 0.5f, 0.5f,
+                                            samplesForMs (300.0));
+        CHECK (loud.left.back() < 0.2f);
+
+        Rig quietRig ("x - max(0, s + 60) / 4");
+        quietRig.parameters.xDomain = 1;
+        quietRig.parameters.attackMs = 0.5f;
+
+        const auto quiet = runWithSidechain (quietRig.engine, quietRig.parameters,
+                                             0.5f, 0.0f, samplesForMs (300.0));
+        CHECK_CLOSE (quiet.left.back(), 0.5f, 0.02f);
+    }
+
+    // With no sidechain s is silence; an AMP formula using s stays neutral.
+    {
+        Rig rig ("x - s / 10");
+        rig.parameters.attackMs = 0.5f;
+
+        const auto result = rig.run (0.5f, samplesForMs (200.0));
+        CHECK_CLOSE (result.left.back(), 0.5f, 2.0e-3);
+        CHECK_CLOSE (rig.engine.getSidechainEnvelope(), 0.0f, 1.0e-6);
+    }
+
+    // Sidechain HPF removes DC from s but never touches the main x path.
+    {
+        Rig rig ("x - max(0, s + 60) / 4");
+        rig.parameters.xDomain = 1;
+        rig.parameters.attackMs = 0.5f;
+        rig.parameters.scHpfHz = 200.0f;
+
+        const auto filtered = runWithSidechain (rig.engine, rig.parameters, 0.5f, 0.5f,
+                                                samplesForMs (1000.0));
+        CHECK_MESSAGE (filtered.left.back() > 0.45f,
+                       "HPF output " + juce::String (filtered.left.back(), 5));
+
+        rig.parameters.scHpfHz = 0.0f;
+        const auto unfiltered = runWithSidechain (rig.engine, rig.parameters, 0.5f, 0.5f,
+                                                  samplesForMs (500.0));
+        CHECK (unfiltered.left.back() < 0.3f);
+    }
+
+    // Monitor Delta removes makeup and plays the removed part.
+    {
+        Rig rig ("min(x, 0.25)");
+        rig.parameters.attackMs = 0.5f;
+        rig.parameters.monitorMode = 1;
+        rig.parameters.makeupDb = 12.0f;
+
+        const auto result = rig.run (0.5f, samplesForMs (200.0));
+        CHECK_CLOSE (result.left.back(), 0.25f, 2.0e-3);
+
+        rig.parameters.mix = 0.5f;
+        const auto half = rig.run (0.5f, samplesForMs (50.0));
+        CHECK_CLOSE (half.left.back(), 0.125f, 5.0e-3);
+
+        rig.parameters.bypassed = true;
+        const auto bypassed = rig.run (0.5f, samplesForMs (200.0));
+        CHECK_CLOSE (bypassed.left.back(), 0.5f, 2.0e-3);
+    }
+
+    // Monitor Sidechain plays the selected sidechain (or silence without it).
+    {
+        Rig rig ("x");
+        rig.parameters.monitorMode = 2;
+        rig.parameters.attackMs = 0.5f;
+
+        const auto withSidechain = runWithSidechain (rig.engine, rig.parameters, 0.5f,
+                                                     0.3f, samplesForMs (50.0));
+        CHECK_CLOSE (withSidechain.left.back(), 0.3f, 2.0e-3);
+
+        const auto withoutSidechain = rig.run (0.5f, samplesForMs (50.0));
+        CHECK_CLOSE (withoutSidechain.left.back(), 0.0f, 2.0e-3);
     }
 
     // Mix at zero is bit-transparent.

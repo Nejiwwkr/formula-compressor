@@ -14,7 +14,7 @@ class FormulaCompressorAudioProcessor;
     Draws f(x) on equal-scale axes in three views:
 
       LEVEL   input / output level in dB
-      GAIN    gain = f(x)/x in dB
+      GAIN    gain = f(x,s)/x in dB, at the current s
       LINEAR  linear amplitude (ordinary axes)
 
     Area fills are teal for boost and vermilion for reduction. Negative output
@@ -84,7 +84,8 @@ private:
     Layout computeLayout() const;
     void rebuildCurve();
 
-    CurveValue makeValue (float inputLinear, float inputDb) const;
+    CurveValue makeValue (float inputLinear, float inputDb,
+                          float sidechainValue) const;
 
     juce::Point<float> toScreen (float inputValue, float outputValue,
                                  juce::Rectangle<float> plot) const;
@@ -118,6 +119,8 @@ private:
     juce::Point<float> hoverPosition { -1.0f, -1.0f };
     bool hovering = false;
     float liveInputLinear = 0.0f;
+    float sidechainValue = 0.0f;
+    bool sidechainActive = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FormulaCurveEditor)
 };

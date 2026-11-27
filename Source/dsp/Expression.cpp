@@ -31,7 +31,7 @@ float smoothstep (float e0, float e1, float v) noexcept
 }
 } // namespace
 
-float Program::eval (float x, float p1, float p2, float p3, float p4) const noexcept
+float Program::eval (float x, float s, float p1, float p2, float p3, float p4) const noexcept
 {
     if (! valid || count <= 0)
         return x;
@@ -60,6 +60,7 @@ float Program::eval (float x, float p1, float p2, float p3, float p4) const noex
         {
             case Op::PushConst:  push (args[static_cast<std::size_t> (i)]); break;
             case Op::PushX:      push (x);  break;
+            case Op::PushS:      push (s);  break;
             case Op::PushP1:     push (p1); break;
             case Op::PushP2:     push (p2); break;
             case Op::PushP3:     push (p3); break;

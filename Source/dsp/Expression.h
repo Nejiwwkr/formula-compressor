@@ -16,6 +16,7 @@ enum class Op : std::uint8_t
 {
     PushConst = 0,
     PushX,
+    PushS,
     PushP1,
     PushP2,
     PushP3,
@@ -86,9 +87,16 @@ struct Program
     std::array<Op, maxOps> ops {};
     std::array<float, maxOps> args {};
     bool valid = false;
+    bool usesSidechain = false;
 
     /** Stack machine evaluation. Invalid or empty programs behave as x. */
-    float eval (float x, float p1, float p2, float p3, float p4) const noexcept;
+    float eval (float x, float s, float p1, float p2, float p3, float p4) const noexcept;
+
+    /** Backwards-compatible evaluation with s = 0. */
+    float eval (float x, float p1, float p2, float p3, float p4) const noexcept
+    {
+        return eval (x, 0.0f, p1, p2, p3, p4);
+    }
 };
 
 } // namespace formula

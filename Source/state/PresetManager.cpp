@@ -25,7 +25,11 @@ const std::vector<PresetManager::BuiltInPreset>& builtIns()
         { "Upward Compress (dB)", "x < -36 ? x + 12 : x",
                                    { 0.25f, 0.25f, 0.0f, 0.0f }, 1 },
         { "Gate (dB)", "x < -40 ? -120 : x",
-                        { 0.25f, 0.25f, 0.0f, 0.0f }, 1 }
+                        { 0.25f, 0.25f, 0.0f, 0.0f }, 1 },
+        { "Sidechain Duck (dB)", "x - max(0, s + 60) / 4",
+                                  { 0.25f, 0.25f, 0.0f, 0.0f }, 1 },
+        { "Sidechain Duck (AMP)", "x * (1 - 0.8 * min(s, 1))",
+                                   { 0.25f, 0.25f, 0.0f, 0.0f }, 0 }
     };
 
     return presets;

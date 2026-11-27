@@ -44,7 +44,7 @@ public:
 
     juce::AudioProcessorValueTreeState& getValueTreeState() noexcept { return apvts; }
 
-    static constexpr int getStateVersion() noexcept { return 3; }
+    static constexpr int getStateVersion() noexcept { return 4; }
 
     static juce::String getDefaultFormulaText();
 
@@ -138,10 +138,23 @@ public:
     }
 
     float getDetectorLevel() const noexcept { return engine.getEnvelopeLevel(); }
+    float getSidechainEnvelope() const noexcept { return engine.getSidechainEnvelope(); }
     float getGainReductionDb() const noexcept { return engine.getGainReductionDb(); }
     float getInputLevelDb() const noexcept { return engine.getInputLevelDb(); }
     float getOutputLevelDb() const noexcept { return engine.getOutputLevelDb(); }
     bool isGainInverted() const noexcept { return engine.isGainInverted(); }
+
+    /** True when aux input bus 1..4 is enabled with at least one channel. */
+    bool isSidechainAvailable (int sidechainIndex) const noexcept;
+
+    /** Selected aux input (0 = Off, 1..4 = SC1..SC4). */
+    int getSelectedSidechain() const noexcept;
+
+    /** s in the current formula domain (linear amplitude or dBFS). */
+    float getSidechainValueForFormula() const noexcept;
+
+    /** True when a selected sidechain bus is actually enabled by the host. */
+    bool isSidechainActiveForDisplay() const noexcept;
 
     /** Sets a parameter from a normalised-UI value (message thread, presets). */
     void setParameterValue (const juce::String& id, float value);
@@ -171,6 +184,10 @@ private:
     std::atomic<float>* mixParam = nullptr;
     std::atomic<float>* makeupParam = nullptr;
     std::atomic<float>* detectorParam = nullptr;
+    std::atomic<float>* scInputParam = nullptr;
+    std::atomic<float>* scHpfParam = nullptr;
+    std::atomic<float>* stereoLinkParam = nullptr;
+    std::atomic<float>* monitorParam = nullptr;
     std::atomic<float>* pParams[4] { nullptr, nullptr, nullptr, nullptr };
     std::atomic<float>* bypassParam = nullptr;
 

@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.3.0 — 2026-11-27
+
+- New two-variable formula `f(x, s)`: `x` is the main-input detector level and
+  `s` is the selected external sidechain detector level. Both use the current
+  Peak/RMS mode and Attack/Release/Hold timing; s is rendered in the same AMP /
+  dBFS domain as x. With no sidechain, s is 0 (AMP) or -120 (dBFS).
+- Four optional stereo aux sidechain inputs SC1–SC4 with an in-plugin selector.
+  FL Studio maps its sidechain slots to plugin inputs 3/4, 5/6, 7/8 and 9/10 on
+  the VFX page. The selected bus is fallback-safe when unavailable.
+- Sidechain HPF (0 = off, 20–500 Hz, 12 dB/oct) applies only to the sidechain
+  detector. New Monitor modes: Off, Delta (removed signal, no make-up), and
+  Sidechain listen (post-HPF).
+- Full stereo LINK 0–100%: 100% is the previous fully-linked behavior, 0% gives
+  each channel its own detector and gain. Sidechain s remains linked.
+- The transfer curve shows the current-s slice of `f(x, s)`, with an S readout;
+  it rebuilds as the sidechain changes only when the formula uses s.
+- New SIDECHAIN card with HPF/LINK knobs and an SC selector; MONITOR is in the
+  GAIN header. The window stays 1000×720 with a 900×680 minimum, and CI renders
+  both sizes.
+- State version 4. New parameters: `scInput`, `scHpf`, `stereoLink`, `monitor`.
+  Loading a v3 state explicitly restores their defaults instead of keeping the
+  current instance values.
+- Added Sidechain Duck (dB) and Sidechain Duck (AMP) built-in formulas; the
+  formula help documents s, the no-sidechain sentinel, and dB-domain examples.
+- Still no lookahead (0 latency) and no auto-makeup; MAKEUP remains manual.
+- Tests cover s evaluation, LINK 0/50/100, sidechain routing/HPF, Monitor,
+  multi-aux selection, state migration and 900×680 UI rendering.
+
 ## 1.2.1 — 2026-11-27
 
 - Relicensed to AGPL-3.0 to match the JUCE 8 AGPLv3 distribution option.

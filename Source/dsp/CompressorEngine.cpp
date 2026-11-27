@@ -25,25 +25,123 @@ void CompressorEngine::prepare (double newSampleRate, int maximumBlockSize)
 
 void CompressorEngine::reset()
 {
-    envelope = 0.0f;
-    rmsSquare = 0.0f;
-    holdCounter = 0;
+    for (int c = 0; c < 2; ++c)
+    {
+        envelope[c] = 0.0f;
+        localRmsSquare[c] = 0.0f;
+        holdCounter[c] = 0;
+        hpfState[c] = {};
+    }
+
+    linkedRmsSquare = 0.0f;
+    sidechainEnvelope = 0.0f;
+    sidechainRmsSquare = 0.0f;
+    sidechainHoldCounter = 0;
+    hpfCoeffs = {};
     primed = false;
 
     lastEnvelope.store (0.0f, std::memory_order_relaxed);
+    lastSidechainEnvelope.store (0.0f, std::memory_order_relaxed);
     gainReductionDb.store (0.0f, std::memory_order_relaxed);
     inputLevelDb.store (-100.0f, std::memory_order_relaxed);
     outputLevelDb.store (-100.0f, std::memory_order_relaxed);
     lastInverted.store (false, std::memory_order_relaxed);
 }
 
+CompressorEngine::BiquadCoeffs CompressorEngine::makeHighPass (float hz,
+                                                               double fs) noexcept
+{
+    BiquadCoeffs coeffs;
+
+    if (hz <= 0.5f || fs <= 0.0)
+        return coeffs;
+
+    const float nyquistLimit = static_cast<float> (0.45 * fs);
+    const float f = std::clamp (hz, 10.0f, std::min (500.0f, nyquistLimit));
+    const float w0 = 2.0f * 3.14159265358979f * f / static_cast<float> (fs);
+    const float c = std::cos (w0);
+    const float s = std::sin (w0);
+    const float alpha = s / (2.0f * 0.70710678f);
+    const float a0 = 1.0f + alpha;
+
+    coeffs.b0 = (1.0f + c) * 0.5f / a0;
+    coeffs.b1 = -(1.0f + c) / a0;
+    coeffs.b2 = coeffs.b0;
+    coeffs.a1 = -2.0f * c / a0;
+    coeffs.a2 = (1.0f - alpha) / a0;
+    coeffs.active = true;
+
+    return coeffs;
+}
+
+float CompressorEngine::processBiquad (const BiquadCoeffs& coeffs,
+                                       BiquadState& state,
+                                       float x) noexcept
+{
+    if (! coeffs.active)
+        return x;
+
+    const float y = coeffs.b0 * x + state.z1;
+    state.z1 = coeffs.b1 * x - coeffs.a1 * y + state.z2;
+    state.z2 = coeffs.b2 * x - coeffs.a2 * y;
+    return y;
+}
+
+float CompressorEngine::evaluateGain (float envelopeLinear, float sidechainValue,
+                                      int xDomain, float p1, float p2, float p3,
+                                      float p4) const noexcept
+{
+    if (activeProgram == nullptr || ! activeProgram->valid)
+        return 1.0f;
+
+    if (xDomain == 1)
+    {
+        const float inputDb = 20.0f * std::log10 (std::max (envelopeLinear, 1.0e-6f));
+        const float outputDb = activeProgram->eval (inputDb, sidechainValue,
+                                                    p1, p2, p3, p4);
+
+        if (outputDb == -std::numeric_limits<float>::infinity())
+            return 0.0f;
+
+        if (std::isnan (outputDb))
+            return 1.0f;
+
+        const float effectiveDb = std::isinf (outputDb) ? 24.0f : outputDb;
+        const float gainDb = std::clamp (effectiveDb - inputDb, -240.0f, 24.0f);
+        const float gain = dbToGain (gainDb);
+        return std::isfinite (gain) ? gain : 1.0f;
+    }
+
+    const float output = activeProgram->eval (envelopeLinear, sidechainValue,
+                                              p1, p2, p3, p4);
+
+    if (! std::isfinite (output))
+        return 1.0f;
+
+    const float gain = output / std::max (envelopeLinear, 1.0e-6f);
+    return std::isfinite (gain) ? gain : 1.0f;
+}
+
 void CompressorEngine::process (float* const* channels, int numChannels, int numSamples,
                                 const EngineParameters& parameters) noexcept
 {
-    if (channels == nullptr || numChannels <= 0 || numSamples <= 0)
+    process (channels, numChannels, numSamples, nullptr, 0, parameters);
+}
+
+void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
+                                int numSamples, const float* const* sidechainChannels,
+                                int numSidechainChannels,
+                                const EngineParameters& parameters) noexcept
+{
+    if (mainChannels == nullptr || numMainChannels <= 0 || numSamples <= 0)
         return;
 
     const juce::ScopedNoDenormals noDenormals;
+
+    numMainChannels = std::clamp (numMainChannels, 1, 2);
+    numSidechainChannels = sidechainChannels != nullptr
+                               ? std::clamp (numSidechainChannels, 0, 2)
+                               : 0;
 
     attackCoefficient = coefficientForMs (parameters.attackMs, sampleRate);
     releaseCoefficient = coefficientForMs (parameters.releaseMs, sampleRate);
@@ -52,6 +150,14 @@ void CompressorEngine::process (float* const* channels, int numChannels, int num
     holdSamples = static_cast<int> (
         std::lround (std::max (0.0f, parameters.holdMs) * 0.001f
                      * static_cast<float> (sampleRate)));
+
+    hpfCoeffs = makeHighPass (parameters.scHpfHz, sampleRate);
+
+    if (! hpfCoeffs.active || numSidechainChannels == 0)
+    {
+        hpfState[0] = {};
+        hpfState[1] = {};
+    }
 
     const float mixTarget = std::clamp (parameters.mix, 0.0f, 1.0f);
     const float makeupTarget = dbToGain (parameters.makeupDb);
@@ -81,132 +187,192 @@ void CompressorEngine::process (float* const* channels, int numChannels, int num
             pSmoothers[i].setTarget (pTargets[i]);
     }
 
+
     const float maxGain = dbToGain (24.0f);
+    const float link = std::clamp (parameters.stereoLink, 0.0f, 1.0f);
+    const bool fullyLinked = link >= 1.0f;
+    const int monitorMode = std::clamp (parameters.monitorMode, 0, 2);
     const int captureSize = static_cast<int> (gainCapture.size());
 
     float blockPeakIn = 0.0f;
     float blockPeakOut = 0.0f;
     float blockMinAbsGain = std::numeric_limits<float>::infinity();
-    float lastGain = 1.0f;
+    float worstGain = 1.0f;
+    bool anyInverted = false;
 
     for (int sample = 0; sample < numSamples; ++sample)
     {
-        float peak = 0.0f;
-        float meanSquare = 0.0f;
+        float mainDetectorPeak[2] {};
+        float mainDetectorMs[2] {};
 
-        for (int channel = 0; channel < numChannels; ++channel)
+        for (int channel = 0; channel < numMainChannels; ++channel)
         {
-            const float raw = channels[channel][sample];
+            const float raw = mainChannels[channel][sample];
             const float value = std::isfinite (raw)
                                     ? std::clamp (raw, -1.0e6f, 1.0e6f)
                                     : 0.0f;
-            peak = std::max (peak, std::abs (value));
-            meanSquare += value * value;
+            mainDetectorPeak[channel] = std::abs (value);
+            mainDetectorMs[channel] = value * value;
+            blockPeakIn = std::max (blockPeakIn, mainDetectorPeak[channel]);
         }
 
-        meanSquare /= static_cast<float> (numChannels);
-        blockPeakIn = std::max (blockPeakIn, peak);
+        float scPeak = 0.0f;
+        float scMeanSquare = 0.0f;
+        float scFiltered[2] {};
 
-        float detector;
+        if (numSidechainChannels > 0)
+        {
+            for (int channel = 0; channel < numSidechainChannels; ++channel)
+            {
+                const float raw = sidechainChannels[channel][sample];
+                float value = std::isfinite (raw)
+                                  ? std::clamp (raw, -1.0e6f, 1.0e6f)
+                                  : 0.0f;
+
+                value = processBiquad (hpfCoeffs, hpfState[channel], value);
+                scFiltered[channel] = value;
+                scPeak = std::max (scPeak, std::abs (value));
+                scMeanSquare += value * value;
+            }
+
+            scMeanSquare /= static_cast<float> (numSidechainChannels);
+        }
+
+        float sidechainDetector;
 
         if (parameters.detectorMode == 1)
         {
-            rmsSquare += (meanSquare - rmsSquare) * rmsCoefficient;
-            detector = std::sqrt (std::max (rmsSquare, 0.0f));
+            sidechainRmsSquare += (scMeanSquare - sidechainRmsSquare) * rmsCoefficient;
+            sidechainDetector = std::sqrt (std::max (sidechainRmsSquare, 0.0f));
         }
         else
         {
-            detector = peak;
+            sidechainDetector = scPeak;
         }
 
-        if (detector > envelope)
-        {
-            envelope += (detector - envelope) * attackCoefficient;
+        updateEnvelope (sidechainEnvelope, sidechainHoldCounter, sidechainDetector,
+                        attackCoefficient, releaseCoefficient, holdSamples);
 
-            if (holdSamples > 0)
-                holdCounter = holdSamples;
-        }
-        else if (holdCounter > 0)
+        float linkedPeak = 0.0f;
+        float linkedMeanSquare = 0.0f;
+
+        for (int channel = 0; channel < numMainChannels; ++channel)
         {
-            --holdCounter;
+            linkedPeak = std::max (linkedPeak, mainDetectorPeak[channel]);
+            linkedMeanSquare += mainDetectorMs[channel];
+        }
+
+        linkedMeanSquare /= static_cast<float> (numMainChannels);
+
+        float linkedDetector;
+
+        if (parameters.detectorMode == 1)
+        {
+            linkedRmsSquare += (linkedMeanSquare - linkedRmsSquare) * rmsCoefficient;
+            linkedDetector = std::sqrt (std::max (linkedRmsSquare, 0.0f));
         }
         else
         {
-            envelope += (detector - envelope) * releaseCoefficient;
+            linkedDetector = linkedPeak;
         }
 
-        if (envelope < 1.0e-9f)
-            envelope = 0.0f;
+        for (int channel = 0; channel < numMainChannels; ++channel)
+        {
+            float localDetector;
+
+            if (parameters.detectorMode == 1)
+            {
+                localRmsSquare[channel] += (mainDetectorMs[channel]
+                                            - localRmsSquare[channel])
+                                           * rmsCoefficient;
+                localDetector = std::sqrt (std::max (localRmsSquare[channel], 0.0f));
+            }
+            else
+            {
+                localDetector = mainDetectorPeak[channel];
+            }
+
+            const float detector = link * linkedDetector
+                                   + (1.0f - link) * localDetector;
+            updateEnvelope (envelope[channel], holdCounter[channel], detector,
+                            attackCoefficient, releaseCoefficient, holdSamples);
+        }
 
         const float p1 = pSmoothers[0].next();
         const float p2 = pSmoothers[1].next();
         const float p3 = pSmoothers[2].next();
         const float p4 = pSmoothers[3].next();
 
-        float gain = 1.0f;
+        const float sidechainValue = parameters.xDomain == 1
+                                         ? 20.0f * std::log10 (
+                                               std::max (sidechainEnvelope, 1.0e-6f))
+                                         : sidechainEnvelope;
 
-        if (activeProgram != nullptr && activeProgram->valid)
+        float gains[2] { 1.0f, 1.0f };
+
+        if (fullyLinked)
         {
-            if (parameters.xDomain == 1)
-            {
-                // dB domain: f(x) is in dBFS, gain dB = f(x) - x.
-                const float inputDb = 20.0f * std::log10 (std::max (envelope, 1.0e-6f));
-                const float outputDb = activeProgram->eval (inputDb, p1, p2, p3, p4);
-
-                if (outputDb == -std::numeric_limits<float>::infinity())
-                {
-                    gain = 0.0f;
-                }
-                else if (! std::isnan (outputDb))
-                {
-                    const float effectiveDb = std::isinf (outputDb) ? 24.0f : outputDb;
-                    const float gainDb = std::clamp (effectiveDb - inputDb,
-                                                     -240.0f, 24.0f);
-                    gain = dbToGain (gainDb);
-
-                    if (! std::isfinite (gain))
-                        gain = 1.0f;
-                }
-            }
-            else
-            {
-                const float output = activeProgram->eval (envelope, p1, p2, p3, p4);
-
-                if (std::isfinite (output))
-                {
-                    gain = output / std::max (envelope, 1.0e-6f);
-
-                    if (! std::isfinite (gain))
-                        gain = 1.0f;
-                }
-            }
+            const float gain = evaluateGain (envelope[0], sidechainValue,
+                                             parameters.xDomain, p1, p2, p3, p4);
+            gains[0] = gains[1] = gain;
+        }
+        else
+        {
+            for (int channel = 0; channel < numMainChannels; ++channel)
+                gains[channel] = evaluateGain (envelope[channel], sidechainValue,
+                                               parameters.xDomain, p1, p2, p3, p4);
         }
 
-        // The sign carries polarity: f(x) < 0 inverts both channels, while
-        // f(x) == 0 is true silence. The magnitude is clamped to +24 dB.
-        gain = std::clamp (gain, -maxGain, maxGain);
+        for (int channel = 0; channel < numMainChannels; ++channel)
+        {
+            float gain = std::clamp (gains[channel], -maxGain, maxGain);
 
-        if (std::abs (gain) < 1.0e-9f)
-            gain = 0.0f;
+            if (std::abs (gain) < 1.0e-9f)
+                gain = 0.0f;
 
-        blockMinAbsGain = std::min (blockMinAbsGain, std::abs (gain));
+            gains[channel] = gain;
+
+            if (std::abs (gain) < blockMinAbsGain)
+            {
+                blockMinAbsGain = std::abs (gain);
+                worstGain = gain;
+            }
+
+            anyInverted = anyInverted || gain < 0.0f;
+        }
 
         if (sample < captureSize)
-            gainCapture[static_cast<std::size_t> (sample)] = gain;
+            gainCapture[static_cast<std::size_t> (sample)] = worstGain;
 
         const float mix = mixSmoother.next();
         const float makeup = makeupSmoother.next();
         const float bypass = bypassSmoother.next();
-        const float wetGain = gain * makeup;
 
-        for (int channel = 0; channel < numChannels; ++channel)
+        for (int channel = 0; channel < numMainChannels; ++channel)
         {
-            float* data = channels[channel];
+            float* data = mainChannels[channel];
             const float rawDry = data[sample];
             const float dry = std::isfinite (rawDry) ? rawDry : 0.0f;
-            const float wet = dry * wetGain;
+            const float gain = gains[channel];
+            const float wet = dry * gain * makeup;
 
             float output = dry + (wet - dry) * mix;
+
+            if (monitorMode == 1)
+            {
+                output = mix * (dry - dry * gain);
+            }
+            else if (monitorMode == 2)
+            {
+                const int detectorChannel = numSidechainChannels > 0
+                                                ? std::min (channel,
+                                                            numSidechainChannels - 1)
+                                                : 0;
+                output = numSidechainChannels > 0
+                             ? scFiltered[detectorChannel]
+                             : 0.0f;
+            }
+
             output = output * (1.0f - bypass) + dry * bypass;
 
             if (! std::isfinite (output))
@@ -215,15 +381,17 @@ void CompressorEngine::process (float* const* channels, int numChannels, int num
             data[sample] = output;
             blockPeakOut = std::max (blockPeakOut, std::abs (output));
         }
-
-        lastGain = gain;
     }
 
-    lastInverted.store (lastGain < 0.0f, std::memory_order_relaxed);
+
+    lastInverted.store (anyInverted, std::memory_order_relaxed);
 
     if (parameters.meterActive)
     {
-        lastEnvelope.store (envelope, std::memory_order_relaxed);
+        lastEnvelope.store (fullyLinked ? envelope[0]
+                                        : std::max (envelope[0], envelope[1]),
+                            std::memory_order_relaxed);
+        lastSidechainEnvelope.store (sidechainEnvelope, std::memory_order_relaxed);
         gainReductionDb.store (std::isfinite (blockMinAbsGain)
                                    ? gainToDb (blockMinAbsGain)
                                    : 0.0f,

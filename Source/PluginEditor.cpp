@@ -62,7 +62,7 @@ FormulaCompressorAudioProcessorEditor::FormulaCompressorAudioProcessorEditor (
     bypassToggle.setColour (juce::ToggleButton::tickColourId, ink);
     addAndMakeVisible (bypassToggle);
 
-    formulaLabel.setText ("f(x:", juce::dontSendNotification);
+    formulaLabel.setText ("f(x, s:", juce::dontSendNotification);
     formulaLabel.setFont (juce::Font (juce::FontOptions (
         juce::Font::getDefaultMonospacedFontName(), 18.0f, juce::Font::plain)));
     formulaLabel.setColour (juce::Label::textColourId, cobalt);
@@ -97,12 +97,18 @@ FormulaCompressorAudioProcessorEditor::FormulaCompressorAudioProcessorEditor (
     statusLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (statusLabel);
 
-    hintLabel.setText ("x | P1-P4 | min max abs pow exp tanh | db() lin() | cond ? a : b",
+    hintLabel.setText ("x, s | P1-P4 | min max abs pow exp tanh | db() lin() | cond ? a : b",
                        juce::dontSendNotification);
     hintLabel.setFont (uiFont (formula::type::annotation));
     hintLabel.setColour (juce::Label::textColourId, muted);
     hintLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (hintLabel);
+
+    sidechainReadoutLabel.setFont (uiFont (formula::type::annotation));
+    sidechainReadoutLabel.setColour (juce::Label::textColourId, muted);
+    sidechainReadoutLabel.setJustificationType (juce::Justification::centredRight);
+    sidechainReadoutLabel.setTooltip ("Sidechain detector level used as s in the formula.");
+    addAndMakeVisible (sidechainReadoutLabel);
 
     styleButton (helpButton);
     helpButton.setTooltip ("Show every variable, operator and function.");
@@ -174,6 +180,12 @@ FormulaCompressorAudioProcessorEditor::FormulaCompressorAudioProcessorEditor (
     setupKnob (7, "P2", "p2", "P2 knob, referenced in the formula as P2.");
     setupKnob (8, "P3", "p3", "P3 knob, referenced in the formula as P3.");
     setupKnob (9, "P4", "p4", "P4 knob, referenced in the formula as P4.");
+    setupKnob (10, "HPF", "scHpf",
+               "High-pass on the selected sidechain detector only (12 dB/oct).",
+               56);
+    setupKnob (11, "LINK", "stereoLink",
+               "Stereo link: 100% = one linked detector, 0% = dual mono.",
+               56);
 
     setupSegmentedButton (detectorPeakButton, 0x44455431,
                           "Peak detection follows transients.");
@@ -202,12 +214,50 @@ FormulaCompressorAudioProcessorEditor::FormulaCompressorAudioProcessorEditor (
 
     refreshDetectorButtons();
 
+    scInputBox.addItem ("OFF", 1);
+    scInputBox.addItem ("SC1", 2);
+    scInputBox.addItem ("SC2", 3);
+    scInputBox.addItem ("SC3", 4);
+    scInputBox.addItem ("SC4", 5);
+    scInputBox.setTooltip ("Selected external sidechain bus. In FL Studio map sidechain slots "
+                           "to plugin inputs 3/4, 5/6, 7/8 and 9/10 on the VFX page.");
+    addAndMakeVisible (scInputBox);
+
+    scInputAttachment = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (
+        processorRef.getValueTreeState(), "scInput", scInputBox);
+
+    setupSegmentedButton (monitorOffButton, 0x4d4f4e31,
+                          "Normal compressor output.");
+    setupSegmentedButton (monitorDeltaButton, 0x4d4f4e31,
+                          "Listen to what the compressor removes (no makeup gain).");
+    setupSegmentedButton (monitorSidechainButton, 0x4d4f4e31,
+                          "Listen to the selected sidechain after the sidechain HPF.");
+
+    monitorOffButton.onClick = [this] { processorRef.setParameterValue ("monitor", 0.0f); refreshMonitorButtons(); };
+    monitorDeltaButton.onClick = [this] { processorRef.setParameterValue ("monitor", 1.0f); refreshMonitorButtons(); };
+    monitorSidechainButton.onClick = [this] { processorRef.setParameterValue ("monitor", 2.0f); refreshMonitorButtons(); };
+
+    if (auto* monitorParameter = processorRef.getValueTreeState().getParameter ("monitor"))
+    {
+        monitorAttachment = std::make_unique<juce::ParameterAttachment> (
+            *monitorParameter,
+            [this] (float) { refreshMonitorButtons(); });
+        monitorAttachment->sendInitialUpdate();
+    }
+
+    refreshMonitorButtons();
+    refreshSidechainState();
+
+    sidechainPollTimer.onTick = [this] { refreshSidechainState(); };
+    sidechainPollTimer.startTimerHz (10);
+
     processorRef.getFormulaBroadcaster().addChangeListener (this);
     refreshFormulaStatus();
 }
 
 FormulaCompressorAudioProcessorEditor::~FormulaCompressorAudioProcessorEditor()
 {
+    sidechainPollTimer.stopTimer();
     processorRef.getFormulaBroadcaster().removeChangeListener (this);
     processorRef.setEditorActive (false);
     setLookAndFeel (nullptr);
@@ -224,13 +274,14 @@ void FormulaCompressorAudioProcessorEditor::styleButton (juce::TextButton& butto
 void FormulaCompressorAudioProcessorEditor::setupKnob (int index,
                                                        const juce::String& caption,
                                                        const juce::String& parameterID,
-                                                       const juce::String& tooltip)
+                                                       const juce::String& tooltip,
+                                                       int textBoxWidth)
 {
     auto& slider = knobs[static_cast<std::size_t> (index)];
     auto& label = knobCaptions[static_cast<std::size_t> (index)];
 
     slider.setSliderStyle (juce::Slider::RotaryVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 62, 16);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, textBoxWidth, 16);
     slider.setColour (juce::Slider::textBoxTextColourId, ink);
     slider.setColour (juce::Slider::textBoxBackgroundColourId, paperBright);
     slider.setColour (juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
@@ -274,8 +325,8 @@ void FormulaCompressorAudioProcessorEditor::paint (juce::Graphics& g)
                             static_cast<float> (bypassToggle.getBottom() - 2));
     }
 
-    // Control cards: TIME / GAIN / FORMULA.
-    static const char* cardTitles[cardCount] = { "TIME", "GAIN", "FORMULA" };
+    // Control cards: TIME / GAIN / FORMULA / SIDECHAIN.
+    static const char* cardTitles[cardCount] = { "TIME", "GAIN", "FORMULA", "SIDECHAIN" };
 
     g.setFont (uiFont (9.5f));
 
@@ -289,10 +340,13 @@ void FormulaCompressorAudioProcessorEditor::paint (juce::Graphics& g)
         g.setColour (panel);
         g.fillRoundedRectangle (card.toFloat(), 7.0f);
 
+        const bool leftAligned = i == 1 || i == 3;
         g.setColour (secondary);
         g.drawText (cardTitles[i],
-                    card.toFloat().reduced (8.0f, 6.0f).withHeight (14.0f),
-                    juce::Justification::centred, false);
+                    card.toFloat().reduced (8.0f, 6.0f).withHeight (16.0f),
+                    leftAligned ? juce::Justification::centredLeft
+                                : juce::Justification::centred,
+                    false);
     }
 
     // Segmented button groups get their own inset track.
@@ -306,6 +360,9 @@ void FormulaCompressorAudioProcessorEditor::paint (juce::Graphics& g)
     };
 
     drawGroupTrack (domainAmpButton.getBounds().getUnion (domainDbButton.getBounds()));
+    drawGroupTrack (monitorOffButton.getBounds()
+                        .getUnion (monitorDeltaButton.getBounds())
+                        .getUnion (monitorSidechainButton.getBounds()));
 }
 
 void FormulaCompressorAudioProcessorEditor::resized()
@@ -335,11 +392,11 @@ void FormulaCompressorAudioProcessorEditor::resized()
         auto row = inner.removeFromTop (46);
 
         auto labelCluster = row.removeFromLeft (200);
-        formulaLabel.setBounds (labelCluster.removeFromLeft (50));
+        formulaLabel.setBounds (labelCluster.removeFromLeft (76));
         labelCluster.removeFromLeft (4);
 
-        auto domainGroup = labelCluster.removeFromLeft (102)
-                               .withSizeKeepingCentre (102, 24);
+        auto domainGroup = labelCluster.removeFromLeft (92)
+                               .withSizeKeepingCentre (92, 24);
         const int domainButtonWidth = (domainGroup.getWidth() - 4) / 2;
         domainDbButton.setBounds (domainGroup.removeFromLeft (domainButtonWidth));
         domainGroup.removeFromLeft (4);
@@ -354,7 +411,9 @@ void FormulaCompressorAudioProcessorEditor::resized()
         helpButton.setBounds (helpArea.withSizeKeepingCentre (66, 24));
         statusLabel.setBounds (actionRow);
 
-        hintLabel.setBounds (inner.removeFromTop (14));
+        auto hintRow = inner.removeFromTop (14);
+        sidechainReadoutLabel.setBounds (hintRow.removeFromRight (120));
+        hintLabel.setBounds (hintRow);
     }
 
     area.removeFromTop (10);
@@ -362,20 +421,22 @@ void FormulaCompressorAudioProcessorEditor::resized()
     auto cardsArea = area.removeFromBottom (140);
     const int cardGap = 10;
 
-    const int knobAreaWidth = cardsArea.getWidth() - cardGap * 2;
-    const int unit = knobAreaWidth / knobCount;
+    const int totalUnits = 12;
+    const int unit = (cardsArea.getWidth() - cardGap * 3) / totalUnits;
 
     cardBounds[0] = cardsArea.removeFromLeft (unit * 3);
     cardsArea.removeFromLeft (cardGap);
     cardBounds[1] = cardsArea.removeFromLeft (unit * 3);
     cardsArea.removeFromLeft (cardGap);
-    cardBounds[2] = cardsArea;
+    cardBounds[2] = cardsArea.removeFromLeft (unit * 4);
+    cardsArea.removeFromLeft (cardGap);
+    cardBounds[3] = cardsArea;
 
     const auto layoutCard = [this] (const juce::Rectangle<int>& card,
                                     int firstKnob, int count)
     {
         auto inner = card.reduced (8, 6);
-        inner.removeFromTop (16); // group title
+        inner.removeFromTop (18); // title row
 
         const int cellWidth = inner.getWidth() / count;
 
@@ -390,9 +451,29 @@ void FormulaCompressorAudioProcessorEditor::resized()
         }
     };
 
-    layoutCard (cardBounds[0], 0, 3); // TIME
-    layoutCard (cardBounds[1], 3, 3); // GAIN: INPUT / MIX / MAKEUP
-    layoutCard (cardBounds[2], 6, 4); // FORMULA
+    layoutCard (cardBounds[0], 0, 3);  // TIME
+    layoutCard (cardBounds[1], 3, 3);  // GAIN: INPUT / MIX / MAKEUP
+    layoutCard (cardBounds[2], 6, 4);  // FORMULA
+    layoutCard (cardBounds[3], 10, 2); // SIDECHAIN: HPF / LINK
+
+    // GAIN header: monitor mode.
+    {
+        auto headerArea = cardBounds[1].reduced (8, 6).removeFromTop (18);
+        auto group = headerArea.removeFromRight (84);
+
+        monitorOffButton.setBounds (group.removeFromLeft (26));
+        group.removeFromLeft (2);
+        monitorDeltaButton.setBounds (group.removeFromLeft (34));
+        group.removeFromLeft (2);
+        monitorSidechainButton.setBounds (group);
+    }
+
+    // SIDECHAIN header: selected aux input.
+    {
+        auto headerArea = cardBounds[3].reduced (8, 6).removeFromTop (18);
+        scInputBox.setBounds (headerArea.removeFromRight (64)
+                                  .withSizeKeepingCentre (64, 18));
+    }
 
     area.removeFromBottom (10);
 
@@ -505,6 +586,68 @@ void FormulaCompressorAudioProcessorEditor::refreshDetectorButtons()
 
     detectorPeakButton.setToggleState (mode == 0, juce::dontSendNotification);
     detectorRmsButton.setToggleState (mode == 1, juce::dontSendNotification);
+}
+
+void FormulaCompressorAudioProcessorEditor::refreshMonitorButtons()
+{
+    const auto* parameter = processorRef.getValueTreeState()
+                                .getRawParameterValue ("monitor");
+    const int mode = parameter != nullptr
+                         ? juce::roundToInt (parameter->load())
+                         : 0;
+
+    monitorOffButton.setToggleState (mode == 0, juce::dontSendNotification);
+    monitorDeltaButton.setToggleState (mode == 1, juce::dontSendNotification);
+    monitorSidechainButton.setToggleState (mode == 2, juce::dontSendNotification);
+}
+
+void FormulaCompressorAudioProcessorEditor::refreshSidechainState()
+{
+    const auto* parameter = processorRef.getValueTreeState()
+                                .getRawParameterValue ("scInput");
+    const int scInput = parameter != nullptr
+                            ? juce::jlimit (0, 4, juce::roundToInt (parameter->load()))
+                            : 0;
+
+    for (int i = 1; i <= 4; ++i)
+        scInputBox.setItemEnabled (i + 1, processorRef.isSidechainAvailable (i));
+
+    const bool active = scInput > 0 && processorRef.isSidechainAvailable (scInput);
+
+    if (! processorRef.isUiFrozen())
+    {
+        if (active)
+        {
+            const float value = processorRef.getSidechainValueForFormula();
+            sidechainReadoutLabel.setText (
+                processorRef.getFormulaDomain() == 1
+                    ? "S " + juce::String (value, 1) + " dB"
+                    : "S " + juce::String (value, 3),
+                juce::dontSendNotification);
+        }
+        else
+        {
+            sidechainReadoutLabel.setText ("S OFF", juce::dontSendNotification);
+        }
+    }
+
+    if (scInput <= 0)
+    {
+        scInputBox.setTooltip ("Sidechain input is off. s = -120 dBFS in dBFS mode "
+                               "or 0 in AMP mode.");
+    }
+    else if (active)
+    {
+        scInputBox.setTooltip ("Listening to SC" + juce::String (scInput)
+                               + ". Formula variable s carries this detector level.");
+    }
+    else
+    {
+        scInputBox.setTooltip ("SC" + juce::String (scInput)
+                               + " is not enabled by the host or has no audio channels; "
+                                 "the sidechain is silent. In standalone, use the internal "
+                                 "main detector via x.");
+    }
 }
 
 void FormulaCompressorAudioProcessorEditor::refreshPresetList()

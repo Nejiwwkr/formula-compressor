@@ -12,7 +12,8 @@
 namespace
 {
 int writeScreenshot (const juce::String& path, const juce::String& modeName,
-                     const juce::String& formulaText, const juce::String& domainName)
+                     const juce::String& formulaText, const juce::String& domainName,
+                     int width, int height)
 {
     auto processor = std::make_unique<FormulaCompressorAudioProcessor>();
     processor->prepareToPlay (48000.0, 512);
@@ -47,7 +48,7 @@ int writeScreenshot (const juce::String& path, const juce::String& modeName,
             curve->setMode (FormulaCurveEditor::ViewMode::Level);
     }
 
-    editor->setSize (1000, 720);
+    editor->setSize (width, height);
 
     // Feed a short program-dependent signal so the scope has something to show.
     {
@@ -141,6 +142,25 @@ int main (int argc, char** argv)
     for (int i = 0; i < argc; ++i)
         arguments.add (argv[i]);
 
+    int screenshotWidth = 1000;
+    int screenshotHeight = 720;
+    const int sizeIndex = arguments.indexOf ("--size");
+
+    if (sizeIndex >= 0 && sizeIndex + 1 < arguments.size())
+    {
+        const auto size = arguments[sizeIndex + 1];
+        const int separator = size.indexOfChar ('x');
+
+        if (separator > 0)
+        {
+            screenshotWidth = juce::jlimit (600, 2400,
+                                            size.substring (0, separator).getIntValue());
+            screenshotHeight = juce::jlimit (500, 1600,
+                                             size.substring (separator + 1).getIntValue());
+            arguments.removeRange (sizeIndex, 2);
+        }
+    }
+
     const int screenshotIndex = arguments.indexOf ("--screenshot");
 
     if (screenshotIndex >= 0 && screenshotIndex + 1 < arguments.size())
@@ -180,7 +200,8 @@ int main (int argc, char** argv)
                 domainName = candidate;
         }
 
-        return writeScreenshot (path, modeName, formulaText, domainName);
+        return writeScreenshot (path, modeName, formulaText, domainName,
+                                screenshotWidth, screenshotHeight);
     }
 
     std::printf ("Formula Compressor tests\n");

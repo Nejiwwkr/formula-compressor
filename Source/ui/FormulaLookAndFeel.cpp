@@ -88,7 +88,14 @@ void FormulaLookAndFeel::drawButtonBackground (juce::Graphics& g,
                                                bool shouldDrawButtonAsDown)
 {
     if (! button.isEnabled())
+    {
+        const auto bounds = button.getLocalBounds().toFloat().reduced (0.5f);
+        g.setColour (panel.withAlpha (0.45f));
+        g.fillRoundedRectangle (bounds, 4.0f);
+        g.setColour (border.withAlpha (0.60f));
+        g.drawRoundedRectangle (bounds, 4.0f, 1.0f);
         return;
+    }
 
     auto fill = button.getToggleState()
                     ? button.findColour (juce::TextButton::buttonOnColourId)
@@ -136,6 +143,7 @@ void FormulaLookAndFeel::drawToggleButton (juce::Graphics& g,
                                            bool shouldDrawButtonAsHighlighted,
                                            bool)
 {
+    juce::ignoreUnused (shouldDrawButtonAsHighlighted);
     const auto bounds = button.getLocalBounds().toFloat();
     const float box = juce::jmin (14.0f, bounds.getHeight() - 2.0f);
     auto boxArea = juce::Rectangle<float> (box, box)
