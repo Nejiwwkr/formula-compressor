@@ -107,7 +107,8 @@ FormulaCompressorAudioProcessorEditor::FormulaCompressorAudioProcessorEditor (
     hintLabel.setMinimumHorizontalScale (0.8f);
     addAndMakeVisible (hintLabel);
 
-    sidechainReadoutLabel.setFont (uiFont (10.0f));
+    sidechainReadoutLabel.setFont (juce::Font (juce::FontOptions (
+        juce::Font::getDefaultMonospacedFontName(), 10.0f, juce::Font::plain)));
     sidechainReadoutLabel.setColour (juce::Label::textColourId, muted);
     sidechainReadoutLabel.setJustificationType (juce::Justification::centredRight);
     sidechainReadoutLabel.setTooltip ("S1..S4 and total S sidechain detector levels.");
@@ -693,7 +694,7 @@ void FormulaCompressorAudioProcessorEditor::refreshSidechainState()
                    + (anyAvailable ? format (processorRef.getSidechainTotalForFormula())
                                    : juce::String ("--")));
 
-        sidechainReadoutLabel.setText (parts.joinIntoString ("  "),
+        sidechainReadoutLabel.setText (parts.joinIntoString (" "),
                                        juce::dontSendNotification);
     }
 

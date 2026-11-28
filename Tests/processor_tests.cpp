@@ -773,6 +773,14 @@ void tests::testProcessor()
                 CHECK_MESSAGE (readout->getText().contains ("S1 ")
                                    && readout->getText().contains ("S "),
                                "readout was " + readout->getText());
+
+                // The widest dBFS readout (all four buses at -120) must fit.
+                const juce::String worstCase (
+                    "S1 -120.0 S2 -120.0 S3 -120.0 S4 -120.0 S -120.0");
+                CHECK_MESSAGE (juce::GlyphArrangement::getStringWidthInt (
+                                   readout->getFont(), worstCase) <= readout->getWidth(),
+                               "readout " + juce::String (readout->getWidth())
+                                   + " px is too narrow for " + worstCase);
                 CHECK (prefix->getWidth() > offPrefixWidth);
                 CHECK (formulaEditor->getWidth() < offEditorWidth);
                 CHECK (prefix->getWidth()
