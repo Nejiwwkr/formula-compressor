@@ -111,11 +111,12 @@ FormulaCompressorAudioProcessor::createParameterLayout()
         juce::AudioParameterChoiceAttributes().withStringFromValueFunction (
             [] (int index, int) { return index == 1 ? "RMS" : "Peak"; })));
 
-    layout.add (std::make_unique<juce::AudioParameterChoice> (
-        juce::ParameterID { "scInput", 1 },
-        "Sidechain Input",
-        juce::StringArray { "Off", "SC1", "SC2", "SC3", "SC4" },
-        0));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { "scEnabled", 1 },
+        "Sidechain",
+        false,
+        juce::AudioParameterBoolAttributes().withStringFromValueFunction (
+            [] (bool value, int) { return value ? "On" : "Off"; })));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "scHpf", 1 },
@@ -200,7 +201,7 @@ FormulaCompressorAudioProcessor::FormulaCompressorAudioProcessor()
     mixParam = apvts.getRawParameterValue ("mix");
     makeupParam = apvts.getRawParameterValue ("makeup");
     detectorParam = apvts.getRawParameterValue ("detector");
-    scInputParam = apvts.getRawParameterValue ("scInput");
+    scEnabledParam = apvts.getRawParameterValue ("scEnabled");
     scHpfParam = apvts.getRawParameterValue ("scHpf");
     stereoLinkParam = apvts.getRawParameterValue ("stereoLink");
     monitorParam = apvts.getRawParameterValue ("monitor");
@@ -369,16 +370,27 @@ bool FormulaCompressorAudioProcessor::isSidechainAvailable (int sidechainIndex) 
            && bus->getNumberOfChannels() > 0;
 }
 
-int FormulaCompressorAudioProcessor::getSelectedSidechain() const noexcept
+bool FormulaCompressorAudioProcessor::isSidechainEnabled() const noexcept
 {
-    return scInputParam != nullptr
-               ? juce::jlimit (0, 4, juce::roundToInt (scInputParam->load()))
-               : 0;
+    return scEnabledParam != nullptr && scEnabledParam->load() >= 0.5f;
 }
 
-float FormulaCompressorAudioProcessor::getSidechainValueForFormula() const noexcept
+float FormulaCompressorAudioProcessor::getSidechainValueForFormula (int sidechainIndex) const noexcept
 {
-    const float envelope = engine.getSidechainEnvelope();
+    if (sidechainIndex < 1 || sidechainIndex > 4)
+        return 0.0f;
+
+    const float envelope = engine.getSidechainEnvelope (sidechainIndex - 1);
+
+    if (getFormulaDomain() == 1)
+        return 20.0f * std::log10 (std::max (envelope, 1.0e-6f));
+
+    return envelope;
+}
+
+float FormulaCompressorAudioProcessor::getSidechainTotalForFormula() const noexcept
+{
+    const float envelope = engine.getSidechainTotalEnvelope();
 
     if (getFormulaDomain() == 1)
         return 20.0f * std::log10 (std::max (envelope, 1.0e-6f));
@@ -388,8 +400,14 @@ float FormulaCompressorAudioProcessor::getSidechainValueForFormula() const noexc
 
 bool FormulaCompressorAudioProcessor::isSidechainActiveForDisplay() const noexcept
 {
-    const int selected = getSelectedSidechain();
-    return selected > 0 && isSidechainAvailable (selected);
+    if (! isSidechainEnabled())
+        return false;
+
+    for (int i = 1; i <= 4; ++i)
+        if (isSidechainAvailable (i))
+            return true;
+
+    return false;
 }
 
 juce::AudioProcessorParameter* FormulaCompressorAudioProcessor::getBypassParameter() const
@@ -448,22 +466,27 @@ void FormulaCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
     parameters.bypassed = bypassParam != nullptr && bypassParam->load() >= 0.5f;
     parameters.meterActive = isEditorActive();
 
-    const int scInput = juce::jlimit (0, 4,
-        scInputParam != nullptr
-            ? juce::roundToInt (scInputParam->load())
-            : 0);
+    const bool sidechainEnabled = isSidechainEnabled();
 
-    const float* sidechainPointers[2] { nullptr, nullptr };
-    int sidechainChannels = 0;
+    formula::SidechainInput sidechains[4];
+    const float* sidechainPointers[4][2] {};
 
-    if (scInput > 0
-        && getChannelCountOfBus (true, scInput) == mainChannels)
+    if (sidechainEnabled)
     {
-        auto sidechainBuffer = getBusBuffer (buffer, true, scInput);
-        sidechainChannels = juce::jlimit (0, 2, sidechainBuffer.getNumChannels());
+        for (int bus = 1; bus <= 4; ++bus)
+        {
+            if (getChannelCountOfBus (true, bus) != mainChannels)
+                continue;
 
-        for (int channel = 0; channel < sidechainChannels; ++channel)
-            sidechainPointers[channel] = sidechainBuffer.getReadPointer (channel);
+            auto sidechainBuffer = getBusBuffer (buffer, true, bus);
+            const int count = juce::jlimit (0, 2, sidechainBuffer.getNumChannels());
+
+            for (int channel = 0; channel < count; ++channel)
+                sidechainPointers[bus - 1][channel] = sidechainBuffer.getReadPointer (channel);
+
+            sidechains[bus - 1].channels = sidechainPointers[bus - 1];
+            sidechains[bus - 1].numChannels = count;
+        }
     }
 
     // Input trim is part of the compressor path; bypass ramps it out too.
@@ -503,8 +526,7 @@ void FormulaCompressorAudioProcessor::processBlock (juce::AudioBuffer<float>& bu
 
     engine.setProgram (publishedProgram.load (std::memory_order_acquire));
     engine.process (mainIO.getArrayOfWritePointers(), mainChannels, numSamples,
-                    sidechainChannels > 0 ? sidechainPointers : nullptr,
-                    sidechainChannels, parameters);
+                    sidechains, sidechainEnabled ? 4 : 0, parameters);
 
     if (scopeActive)
     {
@@ -660,17 +682,38 @@ void FormulaCompressorAudioProcessor::setStateInformation (const void* data, int
     if (! newState.hasProperty ("formula"))
         newState.setProperty ("formula", getDefaultFormulaText(), nullptr);
 
+    bool migratedSidechainEnabled = false;
+    const auto oldSidechain = newState.getChildWithProperty ("id", "scInput");
+
+    if (oldSidechain.isValid())
+    {
+        migratedSidechainEnabled = static_cast<float> (
+            oldSidechain.getProperty ("value", 0.0)) > 0.5f;
+        newState.removeChild (oldSidechain, nullptr);
+    }
+
+    const bool hasNewSidechain = newState.getChildWithProperty ("id", "scEnabled").isValid();
+
     apvts.replaceState (newState);
     apvts.state.setProperty ("stateVersion", getStateVersion(), nullptr);
 
-    if (loadedVersion < 4)
+    if (loadedVersion < 5)
     {
         // Missing APVTS children keep the instance's current values on
         // replaceState, so old projects must be reset explicitly.
-        setParameterValue ("scInput", 0.0f);
-        setParameterValue ("scHpf", 0.0f);
-        setParameterValue ("stereoLink", 1.0f);
-        setParameterValue ("monitor", 0.0f);
+        const bool enabled = loadedVersion >= 4 && migratedSidechainEnabled;
+        setParameterValue ("scEnabled", enabled ? 1.0f : 0.0f);
+
+        if (loadedVersion < 4)
+        {
+            setParameterValue ("scHpf", 0.0f);
+            setParameterValue ("stereoLink", 1.0f);
+            setParameterValue ("monitor", 0.0f);
+        }
+    }
+    else if (! hasNewSidechain)
+    {
+        setParameterValue ("scEnabled", 0.0f);
     }
 
     formulaDomain.store (juce::jlimit (0, 1,

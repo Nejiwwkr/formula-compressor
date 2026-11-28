@@ -45,6 +45,8 @@ jobs:
         run: |
           .\Build\FormulaCompressorTests_artefacts\Release\FormulaCompressorTests.exe --screenshot Build\ci-ui.png level
           .\Build\FormulaCompressorTests_artefacts\Release\FormulaCompressorTests.exe --screenshot Build\ci-ui-900.png level --size 900x680
+          .\Build\FormulaCompressorTests_artefacts\Release\FormulaCompressorTests.exe --screenshot Build\ci-ui-sc.png level --sidechain
+          .\Build\FormulaCompressorTests_artefacts\Release\FormulaCompressorTests.exe --screenshot Build\ci-ui-sc-900.png level --size 900x680 --sidechain
 
       - name: Run pluginval
         shell: pwsh

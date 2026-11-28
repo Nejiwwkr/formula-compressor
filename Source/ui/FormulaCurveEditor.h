@@ -85,7 +85,8 @@ private:
     void rebuildCurve();
 
     CurveValue makeValue (float inputLinear, float inputDb,
-                          float sidechainValue) const;
+                          const std::array<float, 4>& sidechainValues,
+                          float sidechainTotal) const;
 
     juce::Point<float> toScreen (float inputValue, float outputValue,
                                  juce::Rectangle<float> plot) const;
@@ -119,7 +120,8 @@ private:
     juce::Point<float> hoverPosition { -1.0f, -1.0f };
     bool hovering = false;
     float liveInputLinear = 0.0f;
-    float sidechainValue = 0.0f;
+    std::array<float, 4> sidechainValues { 0.0f, 0.0f, 0.0f, 0.0f };
+    float sidechainTotal = 0.0f;
     bool sidechainActive = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (FormulaCurveEditor)

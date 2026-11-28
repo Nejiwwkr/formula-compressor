@@ -44,7 +44,7 @@ public:
 
     juce::AudioProcessorValueTreeState& getValueTreeState() noexcept { return apvts; }
 
-    static constexpr int getStateVersion() noexcept { return 4; }
+    static constexpr int getStateVersion() noexcept { return 5; }
 
     static juce::String getDefaultFormulaText();
 
@@ -138,7 +138,17 @@ public:
     }
 
     float getDetectorLevel() const noexcept { return engine.getEnvelopeLevel(); }
-    float getSidechainEnvelope() const noexcept { return engine.getSidechainEnvelope(); }
+
+    float getSidechainEnvelope (int bus) const noexcept
+    {
+        return engine.getSidechainEnvelope (bus);
+    }
+
+    float getSidechainTotalEnvelope() const noexcept
+    {
+        return engine.getSidechainTotalEnvelope();
+    }
+
     float getGainReductionDb() const noexcept { return engine.getGainReductionDb(); }
     float getInputLevelDb() const noexcept { return engine.getInputLevelDb(); }
     float getOutputLevelDb() const noexcept { return engine.getOutputLevelDb(); }
@@ -147,13 +157,16 @@ public:
     /** True when aux input bus 1..4 is enabled with at least one channel. */
     bool isSidechainAvailable (int sidechainIndex) const noexcept;
 
-    /** Selected aux input (0 = Off, 1..4 = SC1..SC4). */
-    int getSelectedSidechain() const noexcept;
+    /** OFF / ON switch for the whole multi-sidechain detector. */
+    bool isSidechainEnabled() const noexcept;
 
-    /** s in the current formula domain (linear amplitude or dBFS). */
-    float getSidechainValueForFormula() const noexcept;
+    /** sN in the current formula domain (linear amplitude or dBFS), N=1..4. */
+    float getSidechainValueForFormula (int sidechainIndex) const noexcept;
 
-    /** True when a selected sidechain bus is actually enabled by the host. */
+    /** s total in the current formula domain. */
+    float getSidechainTotalForFormula() const noexcept;
+
+    /** True when ON and at least one sidechain bus is enabled. */
     bool isSidechainActiveForDisplay() const noexcept;
 
     /** Sets a parameter from a normalised-UI value (message thread, presets). */
@@ -184,7 +197,7 @@ private:
     std::atomic<float>* mixParam = nullptr;
     std::atomic<float>* makeupParam = nullptr;
     std::atomic<float>* detectorParam = nullptr;
-    std::atomic<float>* scInputParam = nullptr;
+    std::atomic<float>* scEnabledParam = nullptr;
     std::atomic<float>* scHpfParam = nullptr;
     std::atomic<float>* stereoLinkParam = nullptr;
     std::atomic<float>* monitorParam = nullptr;

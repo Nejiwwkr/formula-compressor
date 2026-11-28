@@ -1,5 +1,6 @@
 #include "TestFramework.h"
 
+#include "PluginEditor.h"
 #include "PluginProcessor.h"
 #include "dsp/ExpressionParser.h"
 #include "state/PresetManager.h"
@@ -78,38 +79,30 @@ void tests::testProcessor()
         CHECK (! processor->isBusesLayoutSupported (quad));
 
         const auto withSidechain = [] (juce::AudioChannelSet main,
-                                       juce::AudioChannelSet sc1,
-                                       juce::AudioChannelSet sc2)
+                                       juce::AudioChannelSet sc1)
         {
             juce::AudioProcessor::BusesLayout layout;
             layout.inputBuses.add (main);
             layout.inputBuses.add (sc1);
-            layout.inputBuses.add (sc2);
-            layout.inputBuses.add (juce::AudioChannelSet::disabled());
-            layout.inputBuses.add (juce::AudioChannelSet::disabled());
             layout.outputBuses.add (main);
             return layout;
         };
 
         CHECK (processor->isBusesLayoutSupported (
             withSidechain (juce::AudioChannelSet::stereo(),
-                           juce::AudioChannelSet::stereo(),
-                           juce::AudioChannelSet::disabled())));
+                           juce::AudioChannelSet::stereo())));
 
         CHECK (processor->isBusesLayoutSupported (
             withSidechain (juce::AudioChannelSet::mono(),
-                           juce::AudioChannelSet::mono(),
-                           juce::AudioChannelSet::disabled())));
+                           juce::AudioChannelSet::mono())));
 
         CHECK (! processor->isBusesLayoutSupported (
             withSidechain (juce::AudioChannelSet::stereo(),
-                           juce::AudioChannelSet::mono(),
-                           juce::AudioChannelSet::disabled())));
+                           juce::AudioChannelSet::mono())));
 
         CHECK (! processor->isBusesLayoutSupported (
             withSidechain (juce::AudioChannelSet::stereo(),
-                           juce::AudioChannelSet::quadraphonic(),
-                           juce::AudioChannelSet::disabled())));
+                           juce::AudioChannelSet::quadraphonic())));
     }
 
     // The default is dBFS, compressing a steady 0.5 input to about 0.298.
@@ -318,10 +311,10 @@ void tests::testProcessor()
         CHECK (processor->setFormula (ampClassic).ok);
     }
 
-    // New dynamics controls round trip and state version is 4.
+    // New dynamics controls round trip and state version is 5.
     {
-        CHECK (FormulaCompressorAudioProcessor::getStateVersion() == 4);
-        processor->setParameterValue ("scInput", 2.0f);
+        CHECK (FormulaCompressorAudioProcessor::getStateVersion() == 5);
+        processor->setParameterValue ("scEnabled", 1.0f);
         processor->setParameterValue ("scHpf", 120.0f);
         processor->setParameterValue ("stereoLink", 0.3f);
         processor->setParameterValue ("monitor", 2.0f);
@@ -335,12 +328,12 @@ void tests::testProcessor()
                                        static_cast<int> (state.getSize()));
 
         const auto& tree = restored->getValueTreeState();
-        CHECK_CLOSE (tree.getRawParameterValue ("scInput")->load(), 2.0, 1.0e-3);
+        CHECK_CLOSE (tree.getRawParameterValue ("scEnabled")->load(), 1.0, 1.0e-3);
         CHECK_CLOSE (tree.getRawParameterValue ("scHpf")->load(), 120.0, 1.0e-3);
         CHECK_CLOSE (tree.getRawParameterValue ("stereoLink")->load(), 0.3, 1.0e-3);
         CHECK_CLOSE (tree.getRawParameterValue ("monitor")->load(), 2.0, 1.0e-3);
 
-        processor->setParameterValue ("scInput", 0.0f);
+        processor->setParameterValue ("scEnabled", 0.0f);
         processor->setParameterValue ("scHpf", 0.0f);
         processor->setParameterValue ("stereoLink", 1.0f);
         processor->setParameterValue ("monitor", 0.0f);
@@ -348,14 +341,14 @@ void tests::testProcessor()
 
     // A v3 state must reset the new controls to their defaults explicitly.
     {
-        processor->setParameterValue ("scInput", 3.0f);
+        processor->setParameterValue ("scEnabled", 1.0f);
         processor->setParameterValue ("scHpf", 250.0f);
         processor->setParameterValue ("stereoLink", 0.2f);
         processor->setParameterValue ("monitor", 1.0f);
 
         auto oldState = processor->getValueTreeState().copyState();
 
-        for (const auto* id : { "scInput", "scHpf", "stereoLink", "monitor" })
+        for (const auto* id : { "scEnabled", "scHpf", "stereoLink", "monitor" })
         {
             const auto child = oldState.getChildWithProperty ("id", id);
 
@@ -376,10 +369,40 @@ void tests::testProcessor()
                                         static_cast<int> (data.getSize()));
 
         const auto& tree = processor->getValueTreeState();
-        CHECK_CLOSE (tree.getRawParameterValue ("scInput")->load(), 0.0, 1.0e-3);
+        CHECK_CLOSE (tree.getRawParameterValue ("scEnabled")->load(), 0.0, 1.0e-3);
         CHECK_CLOSE (tree.getRawParameterValue ("scHpf")->load(), 0.0, 1.0e-3);
         CHECK_CLOSE (tree.getRawParameterValue ("stereoLink")->load(), 1.0, 1.0e-3);
         CHECK_CLOSE (tree.getRawParameterValue ("monitor")->load(), 0.0, 1.0e-3);
+    }
+
+    // A v4 state with the old scInput selector maps to OFF/ON and drops the old child.
+    {
+        auto oldState = processor->getValueTreeState().copyState();
+
+        const auto newChild = oldState.getChildWithProperty ("id", "scEnabled");
+        if (newChild.isValid())
+            oldState.removeChild (newChild, nullptr);
+
+        juce::ValueTree oldSc ("PARAM");
+        oldSc.setProperty ("id", "scInput", nullptr);
+        oldSc.setProperty ("value", 3.0f, nullptr);
+        oldState.appendChild (oldSc, nullptr);
+        oldState.setProperty ("stateVersion", 4, nullptr);
+
+        auto xml = oldState.createXml();
+        CHECK (xml != nullptr);
+        juce::MemoryBlock data;
+
+        if (xml != nullptr)
+            juce::AudioProcessor::copyXmlToBinary (*xml, data);
+
+        processor->setStateInformation (data.getData(),
+                                        static_cast<int> (data.getSize()));
+        CHECK (processor->isSidechainEnabled());
+        CHECK (processor->getValueTreeState().copyState()
+                   .getChildWithProperty ("id", "scInput").isValid() == false);
+
+        processor->setParameterValue ("scEnabled", 0.0f);
     }
 
     // Pre-1.2 states without xDomain load as AMP.
@@ -560,15 +583,15 @@ void tests::testProcessor()
         CHECK (buffer.getSample (0, testBlockSize - 1) > 0.0f);
     }
 
-    // Multiple aux sidechains: select one, never write the aux channels.
+    // Four aux sidechains feed s1..s4 and total s; aux channels are never written.
     {
         auto scProcessor = std::make_unique<FormulaCompressorAudioProcessor>();
         juce::AudioProcessor::BusesLayout layout;
         layout.inputBuses.add (juce::AudioChannelSet::stereo());
-        layout.inputBuses.add (juce::AudioChannelSet::stereo());
-        layout.inputBuses.add (juce::AudioChannelSet::stereo());
-        layout.inputBuses.add (juce::AudioChannelSet::disabled());
-        layout.inputBuses.add (juce::AudioChannelSet::disabled());
+
+        for (int i = 0; i < 4; ++i)
+            layout.inputBuses.add (juce::AudioChannelSet::stereo());
+
         layout.outputBuses.add (juce::AudioChannelSet::stereo());
         CHECK (scProcessor->setBusesLayout (layout));
         scProcessor->prepareToPlay (testSampleRate, testBlockSize);
@@ -576,62 +599,203 @@ void tests::testProcessor()
         scProcessor->setFormulaDomain (1);
         CHECK (scProcessor->setFormula ("x - max(0, s + 60) / 4").ok);
         scProcessor->setParameterValue ("attack", 0.5f);
-        scProcessor->setParameterValue ("scInput", 2.0f); // SC2
+        scProcessor->setParameterValue ("scEnabled", 1.0f);
 
-        juce::AudioBuffer<float> buffer (6, testBlockSize);
+        juce::AudioBuffer<float> buffer (10, testBlockSize);
         juce::MidiBuffer midi;
 
-        for (int block = 0; block < 200; ++block)
+        const auto fillInputs = [&] (bool enabled)
         {
             for (int ch = 0; ch < 2; ++ch)
                 juce::FloatVectorOperations::fill (buffer.getWritePointer (ch), 0.5f,
                                                    testBlockSize);
-            juce::FloatVectorOperations::fill (buffer.getWritePointer (2), 0.0f,
-                                               testBlockSize);
-            juce::FloatVectorOperations::fill (buffer.getWritePointer (3), 0.0f,
-                                               testBlockSize);
-            juce::FloatVectorOperations::fill (buffer.getWritePointer (4), 0.5f,
-                                               testBlockSize);
-            juce::FloatVectorOperations::fill (buffer.getWritePointer (5), 0.5f,
-                                               testBlockSize);
 
+            for (int bus = 0; bus < 4; ++bus)
+            {
+                const float level = enabled && bus < 2 ? 0.5f : 0.0f;
+
+                for (int ch = 0; ch < 2; ++ch)
+                    juce::FloatVectorOperations::fill (
+                        buffer.getWritePointer (2 + bus * 2 + ch), level,
+                        testBlockSize);
+            }
+        };
+
+        for (int block = 0; block < 200; ++block)
+        {
+            fillInputs (true);
             scProcessor->processBlock (buffer, midi);
         }
 
         CHECK (buffer.getSample (0, testBlockSize - 1) < 0.3f);
-        CHECK_CLOSE (buffer.getSample (2, 0), 0.0f, 1.0e-6);
+        CHECK_CLOSE (buffer.getSample (2, 0), 0.5f, 1.0e-6);
         CHECK_CLOSE (buffer.getSample (4, 0), 0.5f, 1.0e-6);
-        CHECK_CLOSE (buffer.getSample (5, 0), 0.5f, 1.0e-6);
+        CHECK_CLOSE (buffer.getSample (6, 0), 0.0f, 1.0e-6);
+        CHECK_CLOSE (buffer.getSample (8, 0), 0.0f, 1.0e-6);
 
-        CHECK (scProcessor->getSelectedSidechain() == 2);
+        CHECK (scProcessor->isSidechainEnabled());
+        CHECK (scProcessor->isSidechainAvailable (1));
         CHECK (scProcessor->isSidechainAvailable (2));
         CHECK (scProcessor->isSidechainActiveForDisplay());
-        CHECK_CLOSE (scProcessor->getSidechainValueForFormula(), -6.0206, 1.5);
+        CHECK_CLOSE (scProcessor->getSidechainValueForFormula (1), -6.0206, 1.5);
+        CHECK_CLOSE (scProcessor->getSidechainValueForFormula (2), -6.0206, 1.5);
+        CHECK (scProcessor->getSidechainValueForFormula (3) < -100.0f);
+        CHECK_CLOSE (scProcessor->getSidechainTotalForFormula(), 0.0, 1.5);
 
-        // Selecting the silent SC1 drops s and releases the main path.
-        scProcessor->setParameterValue ("scInput", 1.0f);
-
+        // Muting one aux bus only changes that bus's sN and the total.
         for (int block = 0; block < 200; ++block)
         {
-            for (int ch = 0; ch < 2; ++ch)
-                juce::FloatVectorOperations::fill (buffer.getWritePointer (ch), 0.5f,
-                                                   testBlockSize);
-            juce::FloatVectorOperations::fill (buffer.getWritePointer (2), 0.0f,
-                                               testBlockSize);
-            juce::FloatVectorOperations::fill (buffer.getWritePointer (3), 0.0f,
-                                               testBlockSize);
-            juce::FloatVectorOperations::fill (buffer.getWritePointer (4), 0.5f,
-                                               testBlockSize);
-            juce::FloatVectorOperations::fill (buffer.getWritePointer (5), 0.5f,
-                                               testBlockSize);
+            fillInputs (true);
+            juce::FloatVectorOperations::clear (buffer.getWritePointer (4),
+                                                testBlockSize);
+            juce::FloatVectorOperations::clear (buffer.getWritePointer (5),
+                                                testBlockSize);
+            scProcessor->processBlock (buffer, midi);
+        }
 
+        CHECK_CLOSE (scProcessor->getSidechainValueForFormula (1), -6.0206, 1.0);
+        CHECK (scProcessor->getSidechainValueForFormula (2) < -100.0f);
+        CHECK_CLOSE (scProcessor->getSidechainTotalForFormula(), -6.0206, 1.0);
+
+        // OFF ignores the aux buses and clears the detector immediately.
+        scProcessor->setParameterValue ("scEnabled", 0.0f);
+
+        for (int block = 0; block < 100; ++block)
+        {
+            fillInputs (true);
             scProcessor->processBlock (buffer, midi);
         }
 
         CHECK_CLOSE (buffer.getSample (0, testBlockSize - 1), 0.5f, 0.03f);
-        CHECK (scProcessor->getSelectedSidechain() == 1);
-        CHECK (scProcessor->getSidechainValueForFormula() < -100.0f);
+        CHECK (! scProcessor->isSidechainEnabled());
+        CHECK (scProcessor->getSidechainTotalForFormula() < -100.0f);
+        CHECK_CLOSE (buffer.getSample (2, 0), 0.5f, 1.0e-6);
         scProcessor->setEditorActive (false);
+    }
+
+    // ON with no aux bus enabled: no readout, s is silence, audio stays finite.
+    {
+        auto plain = std::make_unique<FormulaCompressorAudioProcessor>();
+        plain->prepareToPlay (testSampleRate, testBlockSize);
+        plain->setEditorActive (true);
+        plain->setParameterValue ("scEnabled", 1.0f);
+
+        CHECK (plain->isSidechainEnabled());
+        CHECK (! plain->isSidechainAvailable (1));
+        CHECK (! plain->isSidechainActiveForDisplay());
+        CHECK (plain->getSidechainTotalForFormula() < -100.0f);
+
+        juce::AudioBuffer<float> buffer (2, testBlockSize);
+        juce::MidiBuffer midi;
+
+        for (int block = 0; block < 20; ++block)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+                juce::FloatVectorOperations::fill (buffer.getWritePointer (ch), 0.5f,
+                                                   testBlockSize);
+
+            plain->processBlock (buffer, midi);
+            CHECK (allFinite (buffer));
+        }
+
+        CHECK (plain->getSidechainTotalForFormula() < -100.0f);
+        plain->setEditorActive (false);
+    }
+
+    // Editor layout: OFF collapses the header, ON expands it, at both sizes.
+    {
+        auto uiProcessor = std::make_unique<FormulaCompressorAudioProcessor>();
+        uiProcessor->prepareToPlay (testSampleRate, testBlockSize);
+
+        std::unique_ptr<juce::AudioProcessorEditor> editor (uiProcessor->createEditor());
+        CHECK (editor != nullptr);
+
+        if (editor != nullptr)
+        {
+            const auto labelWithId = [&] (const char* id)
+            {
+                return dynamic_cast<juce::Label*> (editor->findChildWithID (id));
+            };
+
+            const int widths[] { 1000, 900 };
+            const int heights[] { 720, 680 };
+
+            for (int sizeIndex = 0; sizeIndex < 2; ++sizeIndex)
+            {
+                editor->setSize (widths[sizeIndex], heights[sizeIndex]);
+
+                auto* prefix = labelWithId ("formulaLabel");
+                auto* equals = labelWithId ("formulaEqualsLabel");
+                auto* readout = labelWithId ("sidechainReadoutLabel");
+                auto* formulaEditor = dynamic_cast<juce::TextEditor*> (
+                    editor->findChildWithID ("formulaEditor"));
+
+                CHECK (prefix != nullptr);
+                CHECK (equals != nullptr);
+                CHECK (readout != nullptr);
+                CHECK (formulaEditor != nullptr);
+
+                if (prefix == nullptr || equals == nullptr || readout == nullptr
+                    || formulaEditor == nullptr)
+                    continue;
+
+                // OFF: short prefix, no s readout, wider editor.
+                CHECK_MESSAGE (prefix->getText() == "f(x:",
+                               "OFF prefix was " + prefix->getText());
+                CHECK (! readout->isVisible());
+                CHECK (! prefix->getText().contains ("s1"));
+
+                const int offEditorWidth = formulaEditor->getWidth();
+                const int offPrefixWidth = prefix->getWidth();
+
+                // The "f(x:" label must not be elided: measured text plus margin.
+                CHECK (prefix->getWidth()
+                       >= juce::GlyphArrangement::getStringWidthInt (prefix->getFont(),
+                                                                     prefix->getText()));
+                CHECK (prefix->getHeight() <= 24);
+                CHECK (equals->getWidth()
+                       >= juce::GlyphArrangement::getStringWidthInt (equals->getFont(),
+                                                                     equals->getText()));
+                CHECK (equals->getHeight() <= 24);
+
+                // ON: s1..s4 in the prefix, readout visible, editor narrower.
+                if (auto* onButton = dynamic_cast<juce::Button*> (
+                        editor->findChildWithID ("scOnButton")))
+                {
+                    if (onButton->onClick)
+                        onButton->onClick();
+                }
+
+                CHECK (uiProcessor->isSidechainEnabled());
+                CHECK_MESSAGE (prefix->getText().contains ("s1..4"),
+                               "ON prefix was " + prefix->getText());
+                CHECK (readout->isVisible());
+                CHECK_MESSAGE (readout->getText().contains ("S1 ")
+                                   && readout->getText().contains ("S "),
+                               "readout was " + readout->getText());
+                CHECK (prefix->getWidth() > offPrefixWidth);
+                CHECK (formulaEditor->getWidth() < offEditorWidth);
+                CHECK (prefix->getWidth()
+                       >= juce::GlyphArrangement::getStringWidthInt (prefix->getFont(),
+                                                                     prefix->getText()));
+                CHECK (prefix->getHeight() <= 24);
+                CHECK (formulaEditor->getWidth() >= 380);
+
+                // Back to OFF for the next size.
+                if (auto* offButton = dynamic_cast<juce::Button*> (
+                        editor->findChildWithID ("scOffButton")))
+                {
+                    if (offButton->onClick)
+                        offButton->onClick();
+                }
+
+                CHECK (! uiProcessor->isSidechainEnabled());
+                CHECK (! readout->isVisible());
+            }
+        }
+
+        editor.reset();
+        uiProcessor->setEditorActive (false);
     }
 
     // Stress: noise-like input across a few formulas stays finite.

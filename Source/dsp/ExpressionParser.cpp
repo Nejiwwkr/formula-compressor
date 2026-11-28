@@ -529,6 +529,11 @@ private:
                     return emit (Op::PushS);
                 }
 
+                if (name == "s1") { program.usesSidechain = true; return emit (Op::PushS1); }
+                if (name == "s2") { program.usesSidechain = true; return emit (Op::PushS2); }
+                if (name == "s3") { program.usesSidechain = true; return emit (Op::PushS3); }
+                if (name == "s4") { program.usesSidechain = true; return emit (Op::PushS4); }
+
                 if (name == "p1") return emit (Op::PushP1);
                 if (name == "p2") return emit (Op::PushP2);
                 if (name == "p3") return emit (Op::PushP3);
@@ -631,18 +636,44 @@ CompileResult compileExpression (const juce::String& text)
     expression = expression.substring (leading);
     offset += leading;
 
-    // Accept the optional "f(x) = ", "f(x,s) = " or "y = " prefix.
+    // Accept an optional "f(...) = " or "y = " prefix. The f-prefix uses
+    // balanced parentheses so every variable signature is accepted.
     const auto lower = expression.toLowerCase();
     int prefixLength = -1;
 
-    if (lower.startsWith ("f(x,s)"))
-        prefixLength = 6;
-    else if (lower.startsWith ("f(x, s)"))
-        prefixLength = 7;
-    else if (lower.startsWith ("f(x)"))
-        prefixLength = 4;
-    else if (lower.startsWith ("y"))
+    if (lower.startsWith ("y"))
+    {
         prefixLength = 1;
+    }
+    else if (lower.startsWith ("f"))
+    {
+        int cursor = 1;
+
+        while (cursor < expression.length()
+               && juce::CharacterFunctions::isWhitespace (expression[cursor]))
+            ++cursor;
+
+        if (cursor < expression.length() && expression[cursor] == '(')
+        {
+            int depth = 0;
+
+            for (int i = cursor; i < expression.length(); ++i)
+            {
+                if (expression[i] == '(')
+                    ++depth;
+                else if (expression[i] == ')')
+                {
+                    --depth;
+
+                    if (depth == 0)
+                    {
+                        prefixLength = i + 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
 
     if (prefixLength >= 0)
     {
@@ -711,7 +742,8 @@ juce::String functionReference()
     return juce::String (
         "VARIABLES\n"
         "  x             main input detector level\n"
-        "  s             selected sidechain detector level, same domain as x\n"
+        "  s1..s4        four independent sidechain detector levels\n"
+        "  s             total sidechain level = linear sum of s1..s4\n"
         "  P1..P4        the four P knobs (-1..+1)\n"
         "  pi, e         constants\n\n"
         "OPERATORS\n"
@@ -729,17 +761,19 @@ juce::String functionReference()
         "  rand()        uniform random in [0,1)\n"
         "  if(c,a,b)     same as c ? a : b\n\n"
         "X DOMAIN (the AMP / dBFS switch)\n"
-        "  AMP           x and s are linear amplitudes, f returns linear amplitude\n"
-        "  dBFS          x and s are dBFS, f returns dBFS; gain dB = f(x,s) - x\n"
+        "  AMP           x, s1..s4 and s are linear amplitudes\n"
+        "  dBFS          x, s1..s4 and s are dBFS; gain dB = f(...) - x\n"
         "  in dBFS mode  f = 0 means 0 dB (unity), not silence; use -120 for mute\n\n"
-        "SIDECHAIN s\n"
-        "  no sidechain  AMP: s = 0;  dBFS: s = -120\n"
-        "  dBFS          s is negative; duck with x - max(0, s + threshold) / ratio\n"
-        "  AMP           s is 0..1; x - s/10 is neutral when s is 0\n"
-        "  the curve view shows f(x,s) at the current s; the S readout shows it\n\n"
+        "SIDECHAIN s1..s4 AND TOTAL s\n"
+        "  no sidechain  each sN = 0 (AMP) or -120 (dBFS); s same\n"
+        "  total s       linear sum of s1..s4, then converted to the current domain\n"
+        "                two -6 dB sidechains -> s = 0 dB\n"
+        "  AMP           x - s/10 uses the total; x - s1/10 uses only SC1\n"
+        "  dBFS          duck with x - max(0, s + threshold) / ratio\n"
+        "  the curve shows f(x, s1..s4, s) at the current values\n\n"
         "POLARITY AND SILENCE (AMP mode)\n"
-        "  f(x,s) < 0    negative gain: both channels are polarity inverted (dashed)\n"
-        "  f(x,s) = 0    true silence; gain magnitude is clamped to +24 dB\n"
+        "  f(...) < 0    negative gain: both channels are polarity inverted (dashed)\n"
+        "  f(...) = 0    true silence; gain magnitude is clamped to +24 dB\n"
         "  mix < 100%    an inverted gain partially cancels the dry signal\n\n"
         "VIEWS\n"
         "  LEVEL         input/output level in dB, equal scale, unity is 45 deg\n"
@@ -748,8 +782,9 @@ juce::String functionReference()
         "EXAMPLES\n"
         "  min(x, P1 + (x - P1) * P2)     classic compression, x in AMP\n"
         "  min(x, -12 + (x + 12) / 4)     classic 4:1, x in dBFS\n"
-        "  x - max(0, s + 60) / 4         sidechain duck, dBFS\n"
-        "  x * (1 - 0.8 * min(s, 1))      sidechain duck, AMP\n"
+        "  x - max(0, s + 60) / 4         total sidechain duck, dBFS\n"
+        "  x - max(0, max(s1, s2)) / 10   SC1/SC2 duck, AMP\n"
+        "  x * (1 - 0.8 * min(s1, 1))     only SC1, AMP\n"
         "  x < -30 ? x : mix(x, -24 + (x + 24) / 4, smoothstep(-30, -24, x))\n"
         "  -0.5 * x                       -6 dB and polarity inverted (AMP)\n");
 }

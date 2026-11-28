@@ -31,6 +31,13 @@ struct EngineParameters
     bool meterActive = true;
 };
 
+/** A read-only view of one optional sidechain bus. */
+struct SidechainInput
+{
+    const float* const* channels = nullptr;
+    int numChannels = 0;
+};
+
 /**
     Stereo-linked feed-forward compressor driven by a user formula.
 
@@ -62,16 +69,28 @@ public:
                   const float* const* sidechainChannels, int numSidechainChannels,
                   const EngineParameters& parameters) noexcept;
 
+    /** Process with up to four sidechain buses (bus index = s1..s4). */
+    void process (float* const* mainChannels, int numMainChannels, int numSamples,
+                  const SidechainInput* sidechains, int numSidechains,
+                  const EngineParameters& parameters) noexcept;
+
     /** Linear detector envelope of the main input, for tests and the live curve marker. */
     float getEnvelopeLevel() const noexcept
     {
         return lastEnvelope.load (std::memory_order_relaxed);
     }
 
-    /** Linear detector envelope of the selected sidechain, for the s readout. */
-    float getSidechainEnvelope() const noexcept
+    /** Linear detector envelope of sidechain bus 0..3, for the S readout. */
+    float getSidechainEnvelope (int bus) const noexcept
     {
-        return lastSidechainEnvelope.load (std::memory_order_relaxed);
+        return bus >= 0 && bus < 4 ? lastSidechainEnvelope[bus].load (std::memory_order_relaxed)
+                                   : 0.0f;
+    }
+
+    /** Linear sum of the four sidechain envelopes. */
+    float getSidechainTotalEnvelope() const noexcept
+    {
+        return lastSidechainTotalEnvelope.load (std::memory_order_relaxed);
     }
 
     float getGainReductionDb() const noexcept
@@ -149,6 +168,14 @@ private:
         bool active = false;
     };
 
+    struct SidechainState
+    {
+        float envelope = 0.0f;
+        float rmsSquare = 0.0f;
+        int holdCounter = 0;
+        BiquadState hpf[2];
+    };
+
     static float coefficientForMs (double timeMs, double sampleRate) noexcept
     {
         return static_cast<float> (
@@ -193,6 +220,7 @@ private:
     static float processBiquad (const BiquadCoeffs&, BiquadState&, float x) noexcept;
 
     float evaluateGain (float envelopeLinear, float sidechainValue,
+                        float s1, float s2, float s3, float s4,
                         int xDomain, float p1, float p2, float p3, float p4) const noexcept;
 
     double sampleRate = 48000.0;
@@ -203,11 +231,7 @@ private:
     int holdCounter[2] {};
     float linkedRmsSquare = 0.0f;
 
-    float sidechainEnvelope = 0.0f;
-    float sidechainRmsSquare = 0.0f;
-    int sidechainHoldCounter = 0;
-
-    BiquadState hpfState[2];
+    SidechainState sidechain[4];
     BiquadCoeffs hpfCoeffs;
 
     float attackCoefficient = 0.01f;
@@ -222,7 +246,8 @@ private:
     ScalarSmoother pSmoothers[4];
 
     std::atomic<float> lastEnvelope { 0.0f };
-    std::atomic<float> lastSidechainEnvelope { 0.0f };
+    std::atomic<float> lastSidechainEnvelope[4] { 0.0f, 0.0f, 0.0f, 0.0f };
+    std::atomic<float> lastSidechainTotalEnvelope { 0.0f };
     std::atomic<float> gainReductionDb { 0.0f };
     std::atomic<float> inputLevelDb { -100.0f };
     std::atomic<float> outputLevelDb { -100.0f };

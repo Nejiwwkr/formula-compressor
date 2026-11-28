@@ -30,18 +30,21 @@ void CompressorEngine::reset()
         envelope[c] = 0.0f;
         localRmsSquare[c] = 0.0f;
         holdCounter[c] = 0;
-        hpfState[c] = {};
     }
 
+    for (auto& sc : sidechain)
+        sc = {};
+
     linkedRmsSquare = 0.0f;
-    sidechainEnvelope = 0.0f;
-    sidechainRmsSquare = 0.0f;
-    sidechainHoldCounter = 0;
     hpfCoeffs = {};
     primed = false;
 
     lastEnvelope.store (0.0f, std::memory_order_relaxed);
-    lastSidechainEnvelope.store (0.0f, std::memory_order_relaxed);
+
+    for (auto& value : lastSidechainEnvelope)
+        value.store (0.0f, std::memory_order_relaxed);
+
+    lastSidechainTotalEnvelope.store (0.0f, std::memory_order_relaxed);
     gainReductionDb.store (0.0f, std::memory_order_relaxed);
     inputLevelDb.store (-100.0f, std::memory_order_relaxed);
     outputLevelDb.store (-100.0f, std::memory_order_relaxed);
@@ -88,6 +91,7 @@ float CompressorEngine::processBiquad (const BiquadCoeffs& coeffs,
 }
 
 float CompressorEngine::evaluateGain (float envelopeLinear, float sidechainValue,
+                                      float s1, float s2, float s3, float s4,
                                       int xDomain, float p1, float p2, float p3,
                                       float p4) const noexcept
 {
@@ -98,6 +102,7 @@ float CompressorEngine::evaluateGain (float envelopeLinear, float sidechainValue
     {
         const float inputDb = 20.0f * std::log10 (std::max (envelopeLinear, 1.0e-6f));
         const float outputDb = activeProgram->eval (inputDb, sidechainValue,
+                                                    s1, s2, s3, s4,
                                                     p1, p2, p3, p4);
 
         if (outputDb == -std::numeric_limits<float>::infinity())
@@ -113,6 +118,7 @@ float CompressorEngine::evaluateGain (float envelopeLinear, float sidechainValue
     }
 
     const float output = activeProgram->eval (envelopeLinear, sidechainValue,
+                                              s1, s2, s3, s4,
                                               p1, p2, p3, p4);
 
     if (! std::isfinite (output))
@@ -125,12 +131,25 @@ float CompressorEngine::evaluateGain (float envelopeLinear, float sidechainValue
 void CompressorEngine::process (float* const* channels, int numChannels, int numSamples,
                                 const EngineParameters& parameters) noexcept
 {
-    process (channels, numChannels, numSamples, nullptr, 0, parameters);
+    process (channels, numChannels, numSamples,
+             static_cast<const SidechainInput*> (nullptr), 0, parameters);
 }
 
 void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
                                 int numSamples, const float* const* sidechainChannels,
                                 int numSidechainChannels,
+                                const EngineParameters& parameters) noexcept
+{
+    SidechainInput input { sidechainChannels, numSidechainChannels };
+    process (mainChannels, numMainChannels, numSamples,
+             sidechainChannels != nullptr && numSidechainChannels > 0 ? &input : nullptr,
+             sidechainChannels != nullptr && numSidechainChannels > 0 ? 1 : 0,
+             parameters);
+}
+
+void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
+                                int numSamples, const SidechainInput* sidechains,
+                                int numSidechains,
                                 const EngineParameters& parameters) noexcept
 {
     if (mainChannels == nullptr || numMainChannels <= 0 || numSamples <= 0)
@@ -139,9 +158,7 @@ void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
     const juce::ScopedNoDenormals noDenormals;
 
     numMainChannels = std::clamp (numMainChannels, 1, 2);
-    numSidechainChannels = sidechainChannels != nullptr
-                               ? std::clamp (numSidechainChannels, 0, 2)
-                               : 0;
+    numSidechains = sidechains != nullptr ? std::clamp (numSidechains, 0, 4) : 0;
 
     attackCoefficient = coefficientForMs (parameters.attackMs, sampleRate);
     releaseCoefficient = coefficientForMs (parameters.releaseMs, sampleRate);
@@ -153,10 +170,21 @@ void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
 
     hpfCoeffs = makeHighPass (parameters.scHpfHz, sampleRate);
 
-    if (! hpfCoeffs.active || numSidechainChannels == 0)
+    for (int bus = 0; bus < 4; ++bus)
     {
-        hpfState[0] = {};
-        hpfState[1] = {};
+        const bool hasInput = bus < numSidechains
+                              && sidechains[bus].channels != nullptr
+                              && sidechains[bus].numChannels > 0;
+
+        if (! hasInput)
+        {
+            sidechain[bus] = {};
+        }
+        else if (! hpfCoeffs.active)
+        {
+            sidechain[bus].hpf[0] = {};
+            sidechain[bus].hpf[1] = {};
+        }
     }
 
     const float mixTarget = std::clamp (parameters.mix, 0.0f, 1.0f);
@@ -187,7 +215,6 @@ void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
             pSmoothers[i].setTarget (pTargets[i]);
     }
 
-
     const float maxGain = dbToGain (24.0f);
     const float link = std::clamp (parameters.stereoLink, 0.0f, 1.0f);
     const bool fullyLinked = link >= 1.0f;
@@ -216,42 +243,54 @@ void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
             blockPeakIn = std::max (blockPeakIn, mainDetectorPeak[channel]);
         }
 
-        float scPeak = 0.0f;
-        float scMeanSquare = 0.0f;
-        float scFiltered[2] {};
+        float scFiltered[4][2] {};
+        float sidechainLinear[4] {};
 
-        if (numSidechainChannels > 0)
+        for (int bus = 0; bus < numSidechains; ++bus)
         {
-            for (int channel = 0; channel < numSidechainChannels; ++channel)
+            const bool hasInput = sidechains[bus].channels != nullptr
+                                  && sidechains[bus].numChannels > 0;
+
+            if (! hasInput)
+                continue;
+
+            const int channelCount = std::clamp (sidechains[bus].numChannels, 0, 2);
+            float peak = 0.0f;
+            float meanSquare = 0.0f;
+
+            for (int channel = 0; channel < channelCount; ++channel)
             {
-                const float raw = sidechainChannels[channel][sample];
+                const float raw = sidechains[bus].channels[channel][sample];
                 float value = std::isfinite (raw)
                                   ? std::clamp (raw, -1.0e6f, 1.0e6f)
                                   : 0.0f;
 
-                value = processBiquad (hpfCoeffs, hpfState[channel], value);
-                scFiltered[channel] = value;
-                scPeak = std::max (scPeak, std::abs (value));
-                scMeanSquare += value * value;
+                value = processBiquad (hpfCoeffs, sidechain[bus].hpf[channel], value);
+                scFiltered[bus][channel] = value;
+                peak = std::max (peak, std::abs (value));
+                meanSquare += value * value;
             }
 
-            scMeanSquare /= static_cast<float> (numSidechainChannels);
-        }
+            meanSquare /= static_cast<float> (std::max (1, channelCount));
 
-        float sidechainDetector;
+            float detector;
 
-        if (parameters.detectorMode == 1)
-        {
-            sidechainRmsSquare += (scMeanSquare - sidechainRmsSquare) * rmsCoefficient;
-            sidechainDetector = std::sqrt (std::max (sidechainRmsSquare, 0.0f));
-        }
-        else
-        {
-            sidechainDetector = scPeak;
-        }
+            if (parameters.detectorMode == 1)
+            {
+                sidechain[bus].rmsSquare += (meanSquare - sidechain[bus].rmsSquare)
+                                            * rmsCoefficient;
+                detector = std::sqrt (std::max (sidechain[bus].rmsSquare, 0.0f));
+            }
+            else
+            {
+                detector = peak;
+            }
 
-        updateEnvelope (sidechainEnvelope, sidechainHoldCounter, sidechainDetector,
-                        attackCoefficient, releaseCoefficient, holdSamples);
+            updateEnvelope (sidechain[bus].envelope, sidechain[bus].holdCounter,
+                            detector, attackCoefficient, releaseCoefficient,
+                            holdSamples);
+            sidechainLinear[bus] = sidechain[bus].envelope;
+        }
 
         float linkedPeak = 0.0f;
         float linkedMeanSquare = 0.0f;
@@ -303,23 +342,42 @@ void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
         const float p3 = pSmoothers[2].next();
         const float p4 = pSmoothers[3].next();
 
-        const float sidechainValue = parameters.xDomain == 1
-                                         ? 20.0f * std::log10 (
-                                               std::max (sidechainEnvelope, 1.0e-6f))
-                                         : sidechainEnvelope;
+        float sidechainTotalLinear = 0.0f;
+
+        for (float value : sidechainLinear)
+            sidechainTotalLinear += value;
+
+        const auto toDomain = [&] (float linear)
+        {
+            return parameters.xDomain == 1
+                       ? 20.0f * std::log10 (std::max (linear, 1.0e-6f))
+                       : linear;
+        };
+
+        const float sidechainTotalValue = toDomain (sidechainTotalLinear);
+        float sidechainValues[4] {
+            toDomain (sidechainLinear[0]),
+            toDomain (sidechainLinear[1]),
+            toDomain (sidechainLinear[2]),
+            toDomain (sidechainLinear[3])
+        };
 
         float gains[2] { 1.0f, 1.0f };
 
         if (fullyLinked)
         {
-            const float gain = evaluateGain (envelope[0], sidechainValue,
+            const float gain = evaluateGain (envelope[0], sidechainTotalValue,
+                                             sidechainValues[0], sidechainValues[1],
+                                             sidechainValues[2], sidechainValues[3],
                                              parameters.xDomain, p1, p2, p3, p4);
             gains[0] = gains[1] = gain;
         }
         else
         {
             for (int channel = 0; channel < numMainChannels; ++channel)
-                gains[channel] = evaluateGain (envelope[channel], sidechainValue,
+                gains[channel] = evaluateGain (envelope[channel], sidechainTotalValue,
+                                               sidechainValues[0], sidechainValues[1],
+                                               sidechainValues[2], sidechainValues[3],
                                                parameters.xDomain, p1, p2, p3, p4);
         }
 
@@ -364,13 +422,18 @@ void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
             }
             else if (monitorMode == 2)
             {
-                const int detectorChannel = numSidechainChannels > 0
-                                                ? std::min (channel,
-                                                            numSidechainChannels - 1)
-                                                : 0;
-                output = numSidechainChannels > 0
-                             ? scFiltered[detectorChannel]
-                             : 0.0f;
+                float monitorSample = 0.0f;
+
+                for (int bus = 0; bus < numSidechains; ++bus)
+                {
+                    const int channelCount = std::clamp (sidechains[bus].numChannels, 0, 2);
+
+                    if (sidechains[bus].channels != nullptr && channelCount > 0)
+                        monitorSample += scFiltered[bus][std::min (channel,
+                                                                   channelCount - 1)];
+                }
+
+                output = monitorSample;
             }
 
             output = output * (1.0f - bypass) + dry * bypass;
@@ -383,7 +446,6 @@ void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
         }
     }
 
-
     lastInverted.store (anyInverted, std::memory_order_relaxed);
 
     if (parameters.meterActive)
@@ -391,7 +453,17 @@ void CompressorEngine::process (float* const* mainChannels, int numMainChannels,
         lastEnvelope.store (fullyLinked ? envelope[0]
                                         : std::max (envelope[0], envelope[1]),
                             std::memory_order_relaxed);
-        lastSidechainEnvelope.store (sidechainEnvelope, std::memory_order_relaxed);
+
+        float totalLinear = 0.0f;
+
+        for (int bus = 0; bus < 4; ++bus)
+        {
+            lastSidechainEnvelope[bus].store (sidechain[bus].envelope,
+                                              std::memory_order_relaxed);
+            totalLinear += sidechain[bus].envelope;
+        }
+
+        lastSidechainTotalEnvelope.store (totalLinear, std::memory_order_relaxed);
         gainReductionDb.store (std::isfinite (blockMinAbsGain)
                                    ? gainToDb (blockMinAbsGain)
                                    : 0.0f,

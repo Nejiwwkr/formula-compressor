@@ -17,6 +17,10 @@ enum class Op : std::uint8_t
     PushConst = 0,
     PushX,
     PushS,
+    PushS1,
+    PushS2,
+    PushS3,
+    PushS4,
     PushP1,
     PushP2,
     PushP3,
@@ -90,12 +94,19 @@ struct Program
     bool usesSidechain = false;
 
     /** Stack machine evaluation. Invalid or empty programs behave as x. */
-    float eval (float x, float s, float p1, float p2, float p3, float p4) const noexcept;
+    float eval (float x, float s, float s1, float s2, float s3, float s4,
+                float p1, float p2, float p3, float p4) const noexcept;
 
-    /** Backwards-compatible evaluation with s = 0. */
+    /** Legacy single-sidechain evaluation: one bus is logically s1. */
+    float eval (float x, float s, float p1, float p2, float p3, float p4) const noexcept
+    {
+        return eval (x, s, s, s, s, s, p1, p2, p3, p4);
+    }
+
+    /** Backwards-compatible evaluation with no sidechain. */
     float eval (float x, float p1, float p2, float p3, float p4) const noexcept
     {
-        return eval (x, 0.0f, p1, p2, p3, p4);
+        return eval (x, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, p1, p2, p3, p4);
     }
 };
 

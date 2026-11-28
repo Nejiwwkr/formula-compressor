@@ -3,6 +3,7 @@
 #include "dsp/CompressorEngine.h"
 #include "dsp/ExpressionParser.h"
 
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -44,6 +45,43 @@ StereoResult runWithSidechain (formula::CompressorEngine& engine,
     const float* detector[2] = { sidechain.data(), sidechain.data() };
 
     engine.process (audio, 2, numSamples, detector, 2, parameters);
+    return result;
+}
+
+/** Runs four independent sidechain buses; absent buses stay nullptr. */
+StereoResult runWithSidechains (formula::CompressorEngine& engine,
+                                const formula::EngineParameters& parameters,
+                                float mainValue,
+                                const std::array<float, 4>& sidechainValues,
+                                const std::array<bool, 4>& present,
+                                int numSamples)
+{
+    StereoResult result;
+    result.left.assign (static_cast<std::size_t> (numSamples), mainValue);
+    result.right.assign (static_cast<std::size_t> (numSamples), mainValue);
+
+    std::array<std::vector<float>, 4> buffers;
+    std::array<std::array<const float*, 2>, 4> rows {};
+    std::array<formula::SidechainInput, 4> inputs {};
+
+    for (int bus = 0; bus < 4; ++bus)
+    {
+        if (! present[static_cast<std::size_t> (bus)])
+            continue;
+
+        buffers[static_cast<std::size_t> (bus)].assign (
+            static_cast<std::size_t> (numSamples),
+            sidechainValues[static_cast<std::size_t> (bus)]);
+
+        const float* data = buffers[static_cast<std::size_t> (bus)].data();
+        rows[static_cast<std::size_t> (bus)] = { data, data };
+        inputs[static_cast<std::size_t> (bus)].channels =
+            rows[static_cast<std::size_t> (bus)].data();
+        inputs[static_cast<std::size_t> (bus)].numChannels = 2;
+    }
+
+    float* audio[2] = { result.left.data(), result.right.data() };
+    engine.process (audio, 2, numSamples, inputs.data(), 4, parameters);
     return result;
 }
 
@@ -218,7 +256,7 @@ void tests::testEngine()
 
         const auto result = rig.run (0.5f, samplesForMs (200.0));
         CHECK_CLOSE (result.left.back(), 0.5f, 2.0e-3);
-        CHECK_CLOSE (rig.engine.getSidechainEnvelope(), 0.0f, 1.0e-6);
+        CHECK_CLOSE (rig.engine.getSidechainTotalEnvelope(), 0.0f, 1.0e-6);
     }
 
     // Sidechain HPF removes DC from s but never touches the main x path.
@@ -258,7 +296,7 @@ void tests::testEngine()
         CHECK_CLOSE (bypassed.left.back(), 0.5f, 2.0e-3);
     }
 
-    // Monitor Sidechain plays the selected sidechain (or silence without it).
+    // Monitor Sidechain plays the sum of all sidechains (or silence without any).
     {
         Rig rig ("x");
         rig.parameters.monitorMode = 2;
@@ -270,6 +308,162 @@ void tests::testEngine()
 
         const auto withoutSidechain = rig.run (0.5f, samplesForMs (50.0));
         CHECK_CLOSE (withoutSidechain.left.back(), 0.0f, 2.0e-3);
+    }
+
+    // Four distinct sidechain envelopes; the total s is their linear sum.
+    {
+        Rig rig ("x");
+        rig.parameters.attackMs = 0.5f;
+
+        const std::array<float, 4> values { 0.1f, 0.2f, 0.3f, 0.4f };
+        const std::array<bool, 4> allPresent { true, true, true, true };
+
+        rig.engine.setProgram (nullptr);
+        runWithSidechains (rig.engine, rig.parameters, 0.5f, values, allPresent,
+                           samplesForMs (500.0));
+
+        CHECK_CLOSE (rig.engine.getSidechainEnvelope (0), 0.1f, 2.0e-3);
+        CHECK_CLOSE (rig.engine.getSidechainEnvelope (1), 0.2f, 2.0e-3);
+        CHECK_CLOSE (rig.engine.getSidechainEnvelope (2), 0.3f, 2.0e-3);
+        CHECK_CLOSE (rig.engine.getSidechainEnvelope (3), 0.4f, 2.0e-3);
+        CHECK_CLOSE (rig.engine.getSidechainTotalEnvelope(), 1.0f, 5.0e-3);
+    }
+
+    // Each formula variable reads its own bus: s2 ignores a loud s1.
+    {
+        Rig rig ("x - s2 / 10");
+        rig.parameters.attackMs = 0.5f;
+
+        const std::array<float, 4> values { 0.8f, 0.2f, 0.0f, 0.0f };
+        const std::array<bool, 4> present { true, true, false, false };
+
+        const auto result = runWithSidechains (rig.engine, rig.parameters, 0.5f,
+                                               values, present, samplesForMs (200.0));
+        CHECK_CLOSE (result.left.back(), 0.48f, 2.0e-3);
+        CHECK_CLOSE (result.right.back(), 0.48f, 2.0e-3);
+    }
+
+    // dBFS total: two -6 dB sidechains sum to 0 dB, not -12 dB.
+    {
+        Rig rig ("x - max(0, s + 60) / 4");
+        rig.parameters.xDomain = 1;
+        rig.parameters.attackMs = 0.5f;
+
+        const std::array<float, 4> values { 0.5f, 0.5f, 0.0f, 0.0f };
+        const std::array<bool, 4> present { true, true, false, false };
+
+        const auto result = runWithSidechains (rig.engine, rig.parameters, 0.5f,
+                                               values, present, samplesForMs (300.0));
+        CHECK_CLOSE (rig.engine.getSidechainTotalEnvelope(), 1.0f, 5.0e-3);
+        // s = 0 dBFS, so the formula subtracts 15 dB from a -6 dB input.
+        CHECK_CLOSE (result.left.back(), 0.5f * 0.177828f, 2.0e-3);
+    }
+
+    // One shared HPF runs on every bus: four DC inputs all lose their energy.
+    {
+        Rig rig ("x - s / 10");
+        rig.parameters.attackMs = 0.5f;
+        rig.parameters.scHpfHz = 200.0f;
+
+        const std::array<float, 4> values { 0.5f, 0.5f, 0.5f, 0.5f };
+        const std::array<bool, 4> allPresent { true, true, true, true };
+
+        const auto result = runWithSidechains (rig.engine, rig.parameters, 0.5f,
+                                               values, allPresent, samplesForMs (2000.0));
+        CHECK_CLOSE (result.left.back(), 0.5f, 2.0e-3);
+        CHECK_MESSAGE (rig.engine.getSidechainTotalEnvelope() < 1.0e-3f,
+                       "HPF should remove DC from every sidechain bus, total "
+                           + juce::String (rig.engine.getSidechainTotalEnvelope(), 6));
+    }
+
+    // Hold is tracked per bus: a held bus stays up while a silent one stays zero.
+    {
+        Rig rig ("x");
+        rig.parameters.attackMs = 0.5f;
+        rig.parameters.releaseMs = 50.0f;
+        rig.parameters.holdMs = 100.0f;
+
+        const std::array<float, 4> loudFirst { 0.5f, 0.0f, 0.0f, 0.0f };
+        const std::array<bool, 4> firstPair { true, true, false, false };
+        const std::array<float, 4> silent { 0.0f, 0.0f, 0.0f, 0.0f };
+
+        runWithSidechains (rig.engine, rig.parameters, 0.5f, loudFirst, firstPair,
+                           samplesForMs (300.0));
+        runWithSidechains (rig.engine, rig.parameters, 0.5f, silent, firstPair,
+                           samplesForMs (50.0));
+
+        CHECK_MESSAGE (rig.engine.getSidechainEnvelope (0) > 0.45f,
+                       "held bus should freeze its envelope");
+        CHECK_CLOSE (rig.engine.getSidechainEnvelope (1), 0.0f, 1.0e-6);
+
+        runWithSidechains (rig.engine, rig.parameters, 0.5f, silent, firstPair,
+                           samplesForMs (100.0));
+        CHECK_MESSAGE (rig.engine.getSidechainEnvelope (0) < 0.30f,
+                       "held bus should release afterwards");
+    }
+
+    // Absent buses (OFF, or a bus the host disabled) are cleared immediately.
+    {
+        Rig rig ("x - s / 10");
+        rig.parameters.attackMs = 0.5f;
+
+        const std::array<float, 4> values { 0.5f, 0.5f, 0.5f, 0.5f };
+        const std::array<bool, 4> allPresent { true, true, true, true };
+        const std::array<float, 4> zeros {};
+
+        runWithSidechains (rig.engine, rig.parameters, 0.5f, values, allPresent,
+                           samplesForMs (300.0));
+        CHECK_CLOSE (rig.engine.getSidechainTotalEnvelope(), 2.0f, 1.0e-2);
+
+        const std::array<bool, 4> nonePresent {};
+        runWithSidechains (rig.engine, rig.parameters, 0.5f, zeros, nonePresent,
+                           samplesForMs (1.0));
+
+        for (int bus = 0; bus < 4; ++bus)
+            CHECK_CLOSE (rig.engine.getSidechainEnvelope (bus), 0.0f, 1.0e-6);
+
+        CHECK_CLOSE (rig.engine.getSidechainTotalEnvelope(), 0.0f, 1.0e-6);
+
+        // Re-enabling starts from silence rather than the stale level.
+        const std::array<bool, 4> onlyFirst { true, false, false, false };
+        runWithSidechains (rig.engine, rig.parameters, 0.5f, values, onlyFirst,
+                           samplesForMs (1.0));
+        CHECK (rig.engine.getSidechainEnvelope (0) < 0.6f);
+        CHECK (rig.engine.getSidechainEnvelope (1) == 0.0f);
+    }
+
+    // Monitor Sidechain sums every post-HPF bus sample.
+    {
+        Rig rig ("x");
+        rig.parameters.monitorMode = 2;
+        rig.parameters.attackMs = 0.5f;
+
+        const std::array<float, 4> values { 0.1f, 0.2f, 0.3f, 0.4f };
+        const std::array<bool, 4> allPresent { true, true, true, true };
+
+        const auto result = runWithSidechains (rig.engine, rig.parameters, 0.5f,
+                                               values, allPresent, samplesForMs (50.0));
+        CHECK_CLOSE (result.left.back(), 1.0f, 2.0e-3);
+        CHECK_CLOSE (result.right.back(), 1.0f, 2.0e-3);
+    }
+
+    // Non-finite sidechain samples never reach the formula or the monitor.
+    {
+        Rig rig ("x - s / 10");
+        rig.parameters.attackMs = 0.5f;
+
+        const std::array<float, 4> values {
+            std::numeric_limits<float>::quiet_NaN(),
+            std::numeric_limits<float>::infinity(),
+            0.0f, 0.0f
+        };
+        const std::array<bool, 4> present { true, true, false, false };
+
+        const auto result = runWithSidechains (rig.engine, rig.parameters, 0.5f,
+                                               values, present, samplesForMs (100.0));
+        CHECK (allFinite (result.left));
+        CHECK (allFinite (result.right));
+        CHECK_CLOSE (rig.engine.getSidechainTotalEnvelope(), 0.0f, 1.0e-6);
     }
 
     // Mix at zero is bit-transparent.

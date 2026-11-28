@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.4.0 — 2026-11-28
+
+- Multi-sidechain modulation: the formula is now `f(x, s1..s4, s)`. Each of the
+  four aux buses has its own detector (`s1`..`s4`); `s` is their linear sum
+  converted to the current domain, so two -6 dBFS sidechains sum to 0 dBFS.
+- The SIDECHAIN selector is now **Off / On**. On uses every aux bus the host
+  enables; there is no bus-number choice. With one aux bus the formula reduces
+  to `s1` and `s2`..`s4` stay silent.
+- The four sidechains share the SC HPF frequency but keep independent filter
+  and envelope state. Monitor **Sidechain** now plays the sum of the four
+  post-HPF buses (phase cancellation and levels above 0 dBFS are possible).
+- Adaptive formula header: Off shows `f(x:`, On shows `f(x, s1..4, s:` and the
+  `S1..S4 + S` readout; the editor widens when the sidechain is off. Fixed the
+  `) =` label wrapping to two lines / eliding into ellipses at 900 px.
+- Parser accepts any balanced `f(...)` / `y =` prefix, adds `s1`..`s4`, and
+  reports `s5` and other unknown variables as errors. Help text documents the
+  per-bus variables and the linear-sum rule.
+- Formula curves rebuild when any `sN` or the total changes, not only the total.
+- State version 5. `scEnabled` (bool) replaces the `scInput` choice. Loading a
+  v4 state maps `scInput` 0 to Off and 1–4 to On and removes the old child.
+  The selected bus identity is not restored: On feeds all enabled aux buses.
+  Formulas using `s` now follow the sum instead of the selected bus; projects
+  with one routed bus are unchanged, multi-bus projects should switch to `sN`.
+  Old `scInput` automation is not migrated; automate `scEnabled` instead.
+- Tests cover per-bus formulas and sentinels, the dB total, independent hold and
+  HPF clearing, Monitor sum, OFF/absent-bus reset, state migration, and the
+  Off/On header layout at 1000×720 and 900×680. The screenshot tool gains
+  `--sidechain`; CI renders both states at both sizes.
+
 ## 1.3.0 — 2026-11-27
 
 - New two-variable formula `f(x, s)`: `x` is the main-input detector level and

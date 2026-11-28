@@ -86,9 +86,10 @@ private:
     juce::TextButton detectorRmsButton { "RMS" };
     std::unique_ptr<juce::ParameterAttachment> detectorAttachment;
 
-    juce::ComboBox scInputBox;
-    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment>
-        scInputAttachment;
+    juce::TextButton scOffButton { "OFF" };
+    juce::TextButton scOnButton { "ON" };
+    std::unique_ptr<juce::ParameterAttachment> scEnabledAttachment;
+    bool sidechainShown = false;
 
     juce::TextButton monitorOffButton { "OFF" };
     juce::TextButton monitorDeltaButton { "DELTA" };

@@ -13,9 +13,28 @@ namespace
 {
 int writeScreenshot (const juce::String& path, const juce::String& modeName,
                      const juce::String& formulaText, const juce::String& domainName,
-                     int width, int height)
+                     int width, int height, bool sidechain)
 {
     auto processor = std::make_unique<FormulaCompressorAudioProcessor>();
+
+    if (sidechain)
+    {
+        // Enable two aux buses so the readout shows live S1/S2 values and
+        // "--" for the two buses the host left disabled.
+        juce::AudioProcessor::BusesLayout layout;
+        layout.inputBuses.add (juce::AudioChannelSet::stereo());
+        layout.inputBuses.add (juce::AudioChannelSet::stereo());
+        layout.inputBuses.add (juce::AudioChannelSet::stereo());
+        layout.inputBuses.add (juce::AudioChannelSet::disabled());
+        layout.inputBuses.add (juce::AudioChannelSet::disabled());
+        layout.outputBuses.add (juce::AudioChannelSet::stereo());
+
+        if (! processor->setBusesLayout (layout))
+            std::printf ("Could not enable sidechain aux buses\n");
+
+        processor->setParameterValue ("scEnabled", 1.0f);
+    }
+
     processor->prepareToPlay (48000.0, 512);
 
     processor->setFormulaDomain (domainName.equalsIgnoreCase ("db") ? 1 : 0);
@@ -56,8 +75,16 @@ int writeScreenshot (const juce::String& path, const juce::String& modeName,
         constexpr int blockSize = 512;
         constexpr int blocks = 225; // 2.4 s
 
-        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::AudioBuffer<float> buffer (processor->getTotalNumInputChannels(),
+                                         blockSize);
         juce::MidiBuffer midi;
+
+        auto main = processor->getBusBuffer (buffer, true, 0);
+        // Two different aux sources so S1 and S2 differ.
+        auto sc1 = sidechain ? processor->getBusBuffer (buffer, true, 1)
+                             : juce::AudioBuffer<float>();
+        auto sc2 = sidechain ? processor->getBusBuffer (buffer, true, 2)
+                             : juce::AudioBuffer<float>();
 
         for (int block = 0; block < blocks; ++block)
         {
@@ -69,13 +96,37 @@ int writeScreenshot (const juce::String& path, const juce::String& modeName,
                 const float value = envelope * static_cast<float> (
                     std::sin (2.0 * 3.14159265358979 * 220.0 * t)) * 0.9f;
 
-                buffer.setSample (0, i, value);
-                buffer.setSample (1, i, value * 0.9f);
+                main.setSample (0, i, value);
+                main.setSample (1, i, value * 0.9f);
+
+                if (sidechain)
+                {
+                    const float sc1Value = envelope * 0.5f * static_cast<float> (
+                        std::sin (2.0 * 3.14159265358979 * 110.0 * t));
+                    const float sc2Value = envelope * 0.25f * static_cast<float> (
+                        std::sin (2.0 * 3.14159265358979 * 330.0 * t));
+
+                    sc1.setSample (0, i, sc1Value);
+                    sc1.setSample (1, i, sc1Value);
+                    sc2.setSample (0, i, sc2Value);
+                    sc2.setSample (1, i, sc2Value);
+                }
             }
 
             processor->processBlock (buffer, midi);
         }
     }
+
+    // No message loop runs here, so the 10 Hz timers never tick. Re-enter the
+    // ON handler for the readout, and broadcast synchronously so the curve
+    // editor picks up the sidechain levels we just fed in.
+    if (sidechain)
+        if (auto* on = dynamic_cast<juce::Button*> (
+                editor->findChildWithID ("scOnButton")))
+            if (on->onClick)
+                on->onClick();
+
+    processor->getFormulaBroadcaster().sendSynchronousChangeMessage();
 
     const auto image = editor->createComponentSnapshot (editor->getLocalBounds());
 
@@ -161,6 +212,9 @@ int main (int argc, char** argv)
         }
     }
 
+    const bool screenshotSidechain = arguments.contains ("--sidechain");
+    arguments.removeString ("--sidechain");
+
     const int screenshotIndex = arguments.indexOf ("--screenshot");
 
     if (screenshotIndex >= 0 && screenshotIndex + 1 < arguments.size())
@@ -201,7 +255,8 @@ int main (int argc, char** argv)
         }
 
         return writeScreenshot (path, modeName, formulaText, domainName,
-                                screenshotWidth, screenshotHeight);
+                                screenshotWidth, screenshotHeight,
+                                screenshotSidechain);
     }
 
     std::printf ("Formula Compressor tests\n");

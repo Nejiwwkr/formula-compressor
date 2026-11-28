@@ -38,6 +38,21 @@ float evalS (const juce::String& text, float x, float s,
     return result.program.eval (x, s, p1, p2, p3, p4);
 }
 
+float evalS4 (const juce::String& text, float x, float s,
+              float s1, float s2, float s3, float s4)
+{
+    const auto result = formula::compileExpression (text);
+
+    if (! result.ok)
+    {
+        tests::report (false, "compile", __FILE__, __LINE__,
+                       text + " -> " + result.error);
+        return std::nanf ("");
+    }
+
+    return result.program.eval (x, s, s1, s2, s3, s4, 0.0f, 0.0f, 0.0f, 0.0f);
+}
+
 void expectError (const juce::String& text, int expectedColumn = -1)
 {
     const auto result = formula::compileExpression (text);
@@ -90,6 +105,58 @@ void tests::testExpression()
 
         CHECK_CLOSE (evalS ("s", 0.2f, 0.7f), 0.7, 1.0e-5);
     }
+
+    // Multi-sidechain variables: s1..s4 are independent of each other and of s.
+    {
+        const auto four = formula::compileExpression ("s1 + 2 * s2 + 3 * s3 + 4 * s4");
+        CHECK (four.ok);
+        CHECK (four.program.usesSidechain);
+        CHECK_CLOSE (four.program.eval (0.0f, 1.0f, 0.1f, 0.2f, 0.3f, 0.4f,
+                                        0.0f, 0.0f, 0.0f, 0.0f),
+                     0.1 + 0.4 + 0.9 + 1.6, 1.0e-5);
+
+        const auto onlyS1 = formula::compileExpression ("x - s1 / 10");
+        CHECK (onlyS1.ok);
+        CHECK (onlyS1.program.usesSidechain);
+        CHECK_CLOSE (onlyS1.program.eval (0.5f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f,
+                                          0.0f, 0.0f, 0.0f, 0.0f),
+                     0.46, 1.0e-5);
+        CHECK_CLOSE (onlyS1.program.eval (0.5f, 0.0f, 0.0f, 0.9f, 0.9f, 0.9f,
+                                          0.0f, 0.0f, 0.0f, 0.0f),
+                     0.5, 1.0e-5);
+
+        // The legacy single-bus overload routes s into every sN.
+        CHECK_CLOSE (four.program.eval (0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f),
+                     0.5 + 1.0 + 1.5 + 2.0, 1.0e-5);
+
+        const auto total = formula::compileExpression ("s");
+        CHECK (total.ok);
+        CHECK (total.program.usesSidechain);
+        CHECK_CLOSE (total.program.eval (0.0f, 0.25f, 0.1f, 0.2f, 0.3f, 0.4f,
+                                         0.0f, 0.0f, 0.0f, 0.0f),
+                     0.25, 1.0e-6);
+
+        // Variables are case-insensitive, like the rest of the language.
+        CHECK_CLOSE (evalS4 ("S2 * 10", 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f),
+                     5.0, 1.0e-5);
+
+        // A program without sidechain variables ignores all sidechain inputs.
+        const auto dry = formula::compileExpression ("x * 2");
+        CHECK (! dry.program.usesSidechain);
+        CHECK_CLOSE (dry.program.eval (0.5f, 0.9f, 0.9f, 0.9f, 0.9f, 0.9f,
+                                       0.0f, 0.0f, 0.0f, 0.0f),
+                     1.0, 1.0e-5);
+    }
+
+    // Generic f(...) prefix: any balanced argument list is accepted.
+    CHECK_CLOSE (evalS4 ("f(x, s1, s2, s3, s4, s) = x + s1 + s2 + s3 + s4 + s",
+                         1.0f, 0.5f, 0.1f, 0.2f, 0.3f, 0.4f),
+                 1.0 + 0.1 + 0.2 + 0.3 + 0.4 + 0.5, 1.0e-5);
+    CHECK_CLOSE (evalS4 ("f ( x , s1 ) = x - s1", 1.0f, 0.0f,
+                         0.25f, 0.0f, 0.0f, 0.0f),
+                 0.75, 1.0e-5);
+    CHECK_CLOSE (evalS4 ("y = s4", 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f),
+                 0.6, 1.0e-5);
     CHECK_CLOSE (eval ("x * 3", 0.25f), 0.75, 1.0e-5);
     CHECK_CLOSE (eval ("pi"), kPi, 1.0e-5);
     CHECK_CLOSE (eval ("e"), 2.718281828, 1.0e-5);
@@ -183,6 +250,8 @@ void tests::testExpression()
 
     // Errors, with rough column checks.
     expectError ("x + q", 5);
+    expectError ("x + s5", 5);
+    expectError ("s10", 1);
     expectError ("foo(x)", 1);
     expectError ("min(x)", 1);
     expectError ("min(1, 2, 3)", 1);
